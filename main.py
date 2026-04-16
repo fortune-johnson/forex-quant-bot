@@ -39,6 +39,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import TimedOut, NetworkError
 import warnings
 warnings.filterwarnings('ignore')
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ════════════════════════════════════════════════════════════════
 #  CONFIGURATION
@@ -76,6 +78,9 @@ FOREX_PAIRS = [
 METALS  = ["XAU_USD", "XAG_USD"]
 INDICES = ["NAS100_USD"]
 ALL_PAIRS = FOREX_PAIRS + METALS + INDICES
+
+
+
 
 ASSET_CATEGORIES = {
     "forex_major": ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "NZD_USD", "USD_CHF"],
@@ -306,6 +311,20 @@ class HistoricalBacktestResult:
     confidence_accuracy: Dict; ml_accuracy: float
     last_run: str; patterns_learned: int
 
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+    def log_message(self, format, *args):
+        pass  # suppress logs
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 # ════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS
@@ -4775,6 +4794,11 @@ async def initial_backtest():
 # ════════════════════════════════════════════════════════════════
 
 def main():
+    Thread(target=start_health_server, daemon=True).start()
+
+    if platform.system() == "Windows":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     if platform.system() == "Windows":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
