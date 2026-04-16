@@ -1,6 +1,6 @@
 python-telegram-bot==21.3
-aiohttp==3.10.11
-matplotlib==3.8.5
-numpy==1.26.4
-scipy==1.13.1
-scikit-learn==1.5.2
+aiohttp
+matplotlib
+numpy<2.0
+scipy<1.14
+scikit-learn<1.6
