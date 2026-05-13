@@ -62,7 +62,7 @@ OANDA_ACCOUNT_ID = os.environ.get(
     "OANDA_ACCOUNT_ID", "101-001-27452070-001")
 TELEGRAM_TOKEN   = os.environ.get(
     "TELEGRAM_TOKEN",
-    "8533545784:AAG1EE1PCu1d_IlzrpfVfnsSl9XzpmJwLj0")
+    "7123896226:AAFLeyCPnfJjJgakBH8twdSDPyznu69ZQa4")
 ENVIRONMENT      = os.environ.get("OANDA_ENV", "practice")
 
 # ── File paths ────────────────────────────────────────────────────
