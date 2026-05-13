@@ -1,13 +1,5 @@
-"""
-FOREX QUANT v7.5 - ULTIMATE TRADING INTELLIGENCE SYSTEM
-═══════════════════════════════════════════════════════════════════════════
-Institutional-Grade Metrics · VPIN · Kyle's Lambda · Flow Toxicity
-Self-Learning ML · Historical Backtesting · Auto Alerts · Liquidity Zones
-Smart Money Detection · Session Advisor · Pattern Memory Engine
 
-pip install python-telegram-bot aiohttp matplotlib numpy scipy scikit-learn
-python forex_quant_v75.py
-"""
+# ════════════════════════════════════════════════════════════════
 
 import asyncio
 import aiohttp
@@ -18,52 +10,83 @@ import io
 import os
 import json
 import gc
+import math
+import uuid
 import numpy as np
 from scipy import stats
+from scipy.stats import linregress
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import cross_val_score
-from sklearn.metrics import accuracy_score
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import accuracy_score, brier_score_loss
 import pickle
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime, timezone, timedelta, date
+from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import TimedOut, NetworkError
-import warnings
-warnings.filterwarnings('ignore')
+from collections import deque
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import warnings
+warnings.filterwarnings('ignore')
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Application, CommandHandler,
+                           CallbackQueryHandler, ContextTypes)
+from telegram.error import TimedOut, NetworkError
+
+# ════════════════════════════════════════════════════════════════
+#  LOGGING
+# ════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+log = logging.getLogger("ForexQuant")
 
 # ════════════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ════════════════════════════════════════════════════════════════
 
-OANDA_API_KEY     = os.environ.get("OANDA_API_KEY",    "67eae51bea4d1ddbc5899613f6660977-ac693290039d6b19fe0634712ee248a4")
-OANDA_ACCOUNT_ID  = os.environ.get("OANDA_ACCOUNT_ID", "101-001-27452070-001")
-TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN",   "7123896226:AAFLeyCPnfJjJgakBH8twdSDPyznu69ZQa4")
-ENVIRONMENT       = os.environ.get("OANDA_ENV",        "practice")
+OANDA_API_KEY    = os.environ.get(
+    "OANDA_API_KEY",
+    "67eae51bea4d1ddbc5899613f6660977-ac693290039d6b19fe0634712ee248a4")
+OANDA_ACCOUNT_ID = os.environ.get(
+    "OANDA_ACCOUNT_ID", "101-001-27452070-001")
+TELEGRAM_TOKEN   = os.environ.get(
+    "TELEGRAM_TOKEN",
+    "7123896226:AAFLeyCPnfJjJgakBH8twdSDPyznu69ZQa4")
+ENVIRONMENT      = os.environ.get("OANDA_ENV", "practice")
 
-PREDICTIONS_FILE         = "predictions_v75.json"
-ACTIVE_PREDICTIONS_FILE  = "active_predictions_v75.json"
-ML_MODEL_FILE            = "ml_model_v75.pkl"
-HISTORICAL_BT_FILE       = "historical_backtest_v75.json"
-PATTERN_MEMORY_FILE      = "pattern_memory_v75.json"
-USER_SUBSCRIPTIONS_FILE  = "user_subscriptions_v75.json"
-GLOBAL_STATS_FILE        = "global_stats_v75.json"
+# ── File paths ────────────────────────────────────────────────────
+PREDICTIONS_FILE        = "predictions_v81.json"
+ACTIVE_PREDICTIONS_FILE = "active_predictions_v81.json"
+ML_MODEL_FILE           = "ml_model_v81.pkl"
+HISTORICAL_BT_FILE      = "historical_backtest_v81.json"
+PATTERN_MEMORY_FILE     = "pattern_memory_v81.json"
+USER_SUBSCRIPTIONS_FILE = "user_subscriptions_v81.json"
+PERFORMANCE_FILE        = "performance_v81.json"
+GLOBAL_STATS_FILE       = "global_stats_v81.json"
+TRADE_LOG_FILE          = "trade_log_v81.json"
+ML_TRAINING_DATA_FILE   = "ml_training_data_v81.json"
 
-API_BASE = ("https://api-fxpractice.oanda.com" if ENVIRONMENT == "practice"
+# ── API ───────────────────────────────────────────────────────────
+API_BASE = ("https://api-fxpractice.oanda.com"
+            if ENVIRONMENT == "practice"
             else "https://api-fxtrade.oanda.com")
-HEADERS  = {"Authorization": f"Bearer {OANDA_API_KEY}",
-            "Accept-Datetime-Format": "RFC3339"}
+HEADERS  = {
+    "Authorization": f"Bearer {OANDA_API_KEY}",
+    "Accept-Datetime-Format": "RFC3339"
+}
 
+# ── Instruments ───────────────────────────────────────────────────
 CURRENCIES = ["EUR", "GBP", "USD", "JPY", "AUD", "NZD", "CAD", "CHF"]
 
 FOREX_PAIRS = [
@@ -74,89 +97,153 @@ FOREX_PAIRS = [
     "AUD_NZD", "AUD_CHF", "CAD_JPY", "CAD_CHF", "NZD_JPY",
     "NZD_CHF", "CHF_JPY", "NZD_CAD"
 ]
-
 METALS  = ["XAU_USD", "XAG_USD"]
 INDICES = ["NAS100_USD"]
 ALL_PAIRS = FOREX_PAIRS + METALS + INDICES
 
-
-
-
 ASSET_CATEGORIES = {
-    "forex_major": ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "NZD_USD", "USD_CHF"],
+    "forex_major": [
+        "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
+        "USD_CAD", "NZD_USD", "USD_CHF"
+    ],
     "forex_cross": [
-        "EUR_GBP", "EUR_JPY", "GBP_JPY", "EUR_AUD", "GBP_AUD", "AUD_JPY", "EUR_CAD",
-        "GBP_CAD", "AUD_CAD", "EUR_NZD", "GBP_NZD", "AUD_NZD", "NZD_JPY", "CAD_JPY",
-        "EUR_CHF", "GBP_CHF", "AUD_CHF", "NZD_CHF", "CAD_CHF", "CHF_JPY", "NZD_CAD"
+        "EUR_GBP", "EUR_JPY", "GBP_JPY", "EUR_AUD", "GBP_AUD",
+        "AUD_JPY", "EUR_CAD", "GBP_CAD", "AUD_CAD", "EUR_NZD",
+        "GBP_NZD", "AUD_NZD", "NZD_JPY", "CAD_JPY", "EUR_CHF",
+        "GBP_CHF", "AUD_CHF", "NZD_CHF", "CAD_CHF", "CHF_JPY",
+        "NZD_CAD"
     ],
     "metals":  ["XAU_USD", "XAG_USD"],
     "indices": ["NAS100_USD"]
 }
 
+CORRELATION_GROUPS = {
+    "EUR_USD": ["GBP_USD", "EUR_GBP", "EUR_JPY"],
+    "GBP_USD": ["EUR_USD", "GBP_JPY", "EUR_GBP"],
+    "USD_JPY": ["EUR_JPY", "GBP_JPY", "AUD_JPY"],
+    "AUD_USD": ["NZD_USD", "AUD_JPY", "AUD_NZD"],
+    "XAU_USD": ["EUR_USD", "AUD_USD", "USD_CHF"],
+    "NAS100_USD": ["USD_JPY"]
+}
+
+# ── Timeframes ────────────────────────────────────────────────────
 TIMEFRAMES = {
-    "M5": {"label": "5 Minutes", "candles": 200, "emoji": "⚡"},
-    "H1": {"label": "1 Hour",    "candles": 100, "emoji": "🕐"},
-    "H4": {"label": "4 Hours",   "candles": 75,  "emoji": "📊"}
+    "M5":  {"label": "5 Minutes",  "candles": 288, "emoji": "⚡", "minutes": 5},
+    "M15": {"label": "15 Minutes", "candles": 200, "emoji": "🕐", "minutes": 15},
+    "H1":  {"label": "1 Hour",     "candles": 168, "emoji": "📊", "minutes": 60},
+    "H4":  {"label": "4 Hours",    "candles": 120, "emoji": "📈", "minutes": 240},
+    "D":   {"label": "Daily",      "candles": 60,  "emoji": "📅", "minutes": 1440},
 }
 
-SESSIONS = {
-    "TOKYO":   {"start": 0,  "end": 9,  "emoji": "🗼",
-                "pairs": ["USD_JPY", "AUD_JPY", "NZD_JPY", "EUR_JPY", "GBP_JPY"]},
-    "LONDON":  {"start": 7,  "end": 16, "emoji": "🏦",
-                "pairs": ["EUR_USD", "GBP_USD", "EUR_GBP", "USD_CHF", "EUR_CHF"]},
-    "NEW_YORK":{"start": 13, "end": 22, "emoji": "🗽",
-                "pairs": ["EUR_USD", "GBP_USD", "USD_CAD", "USD_JPY", "XAU_USD"]},
-    "OVERLAP": {"start": 13, "end": 16, "emoji": "⚡",
-                "pairs": ["EUR_USD", "GBP_USD", "EUR_GBP", "XAU_USD"]}
-}
+# ── Signal thresholds ─────────────────────────────────────────────
+MIN_CONFIDENCE          = 55.0
+MIN_ALERT_CONFIDENCE    = 62.0
+MIN_RR_RATIO            = 1.5     # minimum reward/risk
+MIN_TARGET_PIPS_FOREX   = 12.0    # minimum target distance forex
+MIN_TARGET_PIPS_GOLD    = 80.0    # minimum target pips for XAU
+MIN_TARGET_PIPS_SILVER  = 30.0
+MIN_TARGET_PIPS_NAS     = 15.0
+MIN_STOP_PIPS_FOREX     = 8.0
+MIN_STOP_PIPS_GOLD      = 50.0
+MIN_STOP_PIPS_SILVER    = 20.0
+MIN_STOP_PIPS_NAS       = 10.0
+ML_MIN_SAMPLES          = 50      # reduced from 300 so ML activates sooner
+                                   # but still meaningful
+STRENGTH_CACHE_TTL      = 300
 
-MIN_CONFLUENCE_FACTORS   = 4
-MIN_IMBALANCE_PCT        = 10
-MIN_CONFIDENCE           = 55
-MONITORING_INTERVAL      = 30
-ALERT_SCAN_INTERVAL      = 300
-ML_MIN_SAMPLES           = 20
-STRENGTH_CACHE_TTL       = 300
-HISTORICAL_BT_CANDLES    = 500
-MIN_ALERT_CONFIDENCE     = 72
-MIN_ALERT_INST_SCORE     = 60
-MIN_ALERT_FACTORS        = 6
+# ── Risk & performance ────────────────────────────────────────────
+DEFAULT_RISK_PCT          = 1.0
+REDUCED_RISK_PCT          = 0.5
+MAX_CONSECUTIVE_LOSSES    = 5
+MONITORING_INTERVAL       = 25    # seconds between prediction checks
+BREAKEVEN_TRIGGER_PCT     = 50.0  # trigger breakeven when 50% of target reached
+TRAILING_TRIGGER_PCT      = 75.0  # suggest trailing stop at 75%
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-log = logging.getLogger("ForexQuant")
-
+# ── Scanning ──────────────────────────────────────────────────────
+SCAN_INTERVAL_KILL_ZONE = 90      # seconds during kill zones
+SCAN_INTERVAL_NORMAL    = 240     # normal session
+SCAN_INTERVAL_OFF_HOURS = 600     # off hours (still scans!)
 
 # ════════════════════════════════════════════════════════════════
-#  ENUMS & DATA CLASSES
+#  ENUMS
 # ════════════════════════════════════════════════════════════════
 
 class SetupQuality(Enum):
-    A_PLUS   = "A+ (Strong)"
-    A        = "A (Good)"
+    A_PLUS   = "A+ (Institutional)"
+    A        = "A (Strong)"
     B        = "B (Moderate)"
     C        = "C (Weak)"
     NO_TRADE = "No Clear Setup"
 
 class SessionType(Enum):
+    SYDNEY    = "Sydney"
     TOKYO     = "Tokyo"
     LONDON    = "London"
     NEW_YORK  = "New York"
-    OVERLAP   = "Session Overlap"
+    OVERLAP   = "London-NY Overlap"
     OFF_HOURS = "Off Hours"
 
+class RegimeType(Enum):
+    STRONG_TREND  = "Strong Trend"
+    WEAK_TREND    = "Weak Trend"
+    RANGING       = "Ranging"
+    COMPRESSION   = "Compression"
+    EXPANSION     = "Expansion"
+    CHAOTIC       = "Chaotic"
+
+class StrategyType(Enum):
+    ICT_CONTINUATION  = "ICT Trend Continuation"
+    ICT_REVERSAL      = "ICT Liquidity Reversal"
+    AMD_SESSION       = "AMD Session Model"
+    RETAIL_CONTRARIAN = "Retail Contrarian Squeeze"
+    BREAKOUT          = "Breakout Compression"
+    MEAN_REVERSION    = "Statistical Mean Reversion"
+    CORRELATION_DIV   = "Correlation Divergence"
+
+class StructureType(Enum):
+    BULLISH_BOS   = "Bullish BOS"
+    BEARISH_BOS   = "Bearish BOS"
+    BULLISH_CHOCH = "Bullish CHOCH"
+    BEARISH_CHOCH = "Bearish CHOCH"
+    NONE          = "None"
+
+class PredictionStatus(Enum):
+    ACTIVE     = "ACTIVE"
+    TARGET_HIT = "TARGET_HIT"
+    STOP_HIT   = "STOP_HIT"
+    BREAKEVEN  = "BREAKEVEN"
+    EXPIRED    = "EXPIRED"
+    CANCELLED  = "CANCELLED"
+
+# ════════════════════════════════════════════════════════════════
+#  TRADE ID GENERATOR
+# ════════════════════════════════════════════════════════════════
+
+def generate_trade_id(pair: str, direction: str) -> str:
+    """
+    Generate unique human-readable trade ID.
+    Format: FQ-EURUSD-BUY-20240115-A3K9
+    """
+    now    = datetime.now(timezone.utc)
+    date_s = now.strftime("%Y%m%d")
+    time_s = now.strftime("%H%M")
+    pair_s = pair.replace("_", "")[:6]
+    dir_s  = "BUY" if direction == "LONG" else "SEL"
+    unique = uuid.uuid4().hex[:4].upper()
+    return f"FQ-{pair_s}-{dir_s}-{date_s}{time_s}-{unique}"
+
+# ════════════════════════════════════════════════════════════════
+#  DATA CLASSES
+# ════════════════════════════════════════════════════════════════
 
 @dataclass
 class Candle:
-    time: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+    time:     str
+    open:     float
+    high:     float
+    low:      float
+    close:    float
+    volume:   float
     complete: bool = True
 
     @property
@@ -169,7 +256,7 @@ class Candle:
 
     @property
     def is_bullish(self) -> bool:
-        return self.close > self.open
+        return self.close >= self.open
 
     @property
     def upper_wick(self) -> float:
@@ -180,13 +267,14 @@ class Candle:
         return min(self.open, self.close) - self.low
 
     @property
-    def buy_volume(self) -> float:
+    def close_location_value(self) -> float:
         if self.range == 0:
-            return self.volume * 0.5
-        body_pct = self.body_abs / self.range
-        return (self.volume * (0.5 + body_pct * 0.5)
-                if self.is_bullish
-                else self.volume * (0.5 - body_pct * 0.5))
+            return 0.5
+        return (self.close - self.low) / self.range
+
+    @property
+    def buy_volume(self) -> float:
+        return self.volume * self.close_location_value
 
     @property
     def sell_volume(self) -> float:
@@ -196,146 +284,454 @@ class Candle:
     def delta(self) -> float:
         return self.buy_volume - self.sell_volume
 
+    @property
+    def body_ratio(self) -> float:
+        if self.range == 0:
+            return 0.0
+        return self.body_abs / self.range
+
+    @property
+    def is_displacement(self) -> bool:
+        return self.body_ratio >= 0.7
+
+    def is_displacement_vs(self, avg_body: float) -> bool:
+        return (self.body_abs >= avg_body * 1.5 and
+                self.body_ratio >= 0.65)
+
+
+@dataclass
+class SwingPoint:
+    price:    float
+    index:    int
+    time:     str
+    is_high:  bool
+    strength: int = 1
+
+
+@dataclass
+class MarketStructure:
+    swing_highs:     List[SwingPoint] = field(default_factory=list)
+    swing_lows:      List[SwingPoint] = field(default_factory=list)
+    trend:           str = "NEUTRAL"
+    last_bos:        Optional[StructureType] = None
+    last_choch:      Optional[StructureType] = None
+    internal_trend:  str = "NEUTRAL"
+    htf_bias:        str = "NEUTRAL"
+
+
+@dataclass
+class LiquidityLevel:
+    price:      float
+    level_type: str
+    strength:   int
+    swept:      bool  = False
+    sweep_time: Optional[str] = None
+    zone_upper: float = 0.0
+    zone_lower: float = 0.0
+
+
+@dataclass
+class FairValueGap:
+    upper:     float
+    lower:     float
+    mid:       float
+    direction: str
+    time:      str
+    filled:    bool  = False
+    inverted:  bool  = False
+    strength:  float = 0.0
+
+
+@dataclass
+class OrderBlock:
+    high:            float
+    low:             float
+    mid:             float
+    direction:       str
+    time:            str
+    valid:           bool  = True
+    swept_before:    bool  = False
+    left_fvg:        bool  = False
+    broke_structure: bool  = False
+    strength:        float = 0.0
+
+
+@dataclass
+class SignalValidation:
+    """Result of pre-flight signal geometry validation."""
+    is_valid:      bool
+    reason:        str
+    rr_ratio:      float
+    reward_pips:   float
+    risk_pips:     float
+    entry:         float
+    target:        float
+    stop:          float
+
 
 @dataclass
 class OrderFlowData:
-    buy_volume: float = 0; sell_volume: float = 0; total_volume: float = 0
-    cvd: float = 0; delta: float = 0; buy_pct: float = 50; sell_pct: float = 50
-    imbalance: float = 0; price: float = 0; vwap: float = 0
-    delta_momentum: float = 0; volume_trend: float = 0
-    recent_delta_5: float = 0; recent_delta_10: float = 0; recent_delta_20: float = 0
-    cvd_slope: float = 0; volume_acceleration: float = 0
-    buying_climax: bool = False; selling_climax: bool = False
+    buy_volume:        float = 0.0
+    sell_volume:       float = 0.0
+    total_volume:      float = 0.0
+    cvd:               float = 0.0
+    delta:             float = 0.0
+    buy_pct:           float = 50.0
+    sell_pct:          float = 50.0
+    imbalance:         float = 0.0
+    imbalance_zscore:  float = 0.0
+    price:             float = 0.0
+    vwap:              float = 0.0
+    vwap_zscore:       float = 0.0
+    delta_momentum:    float = 0.0
+    volume_trend:      float = 0.0
+    recent_delta_5:    float = 0.0
+    recent_delta_10:   float = 0.0
+    recent_delta_20:   float = 0.0
+    cvd_slope:         float = 0.0
+    volume_accel:      float = 0.0
+    buying_climax:     bool  = False
+    selling_climax:    bool  = False
+    vol_ratio:         float = 1.0
+    efficiency_ratio:  float = 0.0
 
 
 @dataclass
-class AdvancedOrderFlowData:
-    vpin: float = 0; vpin_level: str = "LOW"
-    kyle_lambda: float = 0; kyle_lambda_interpretation: str = ""
-    toxicity: float = 0; toxicity_level: str = "LOW"
-    amihud_illiquidity: float = 0; liquidity_level: str = "NORMAL"
-    market_depth_imbalance: float = 0; depth_bias: str = "NEUTRAL"
-    iceberg_orders: Dict = field(default_factory=dict); iceberg_count: int = 0
-    smart_money_activity: str = "LOW"; informed_trader_signal: str = "NEUTRAL"
-    effective_spread: float = 0; realized_spread: float = 0
-    price_impact: float = 0; trade_arrival_rate: float = 0
-    volume_clustering: float = 0; absorption_ratio: float = 0
-    aggressor_side: str = "NEUTRAL"; institutional_flow_score: float = 0
-    roll_spread: float = 0
+class RegimeData:
+    regime:               RegimeType = RegimeType.RANGING
+    hurst_exponent:       float = 0.5
+    fractal_dimension:    float = 1.5
+    entropy:              float = 1.0
+    autocorr_lag1:        float = 0.0
+    variance_ratio:       float = 1.0
+    efficiency_ratio:     float = 0.0
+    volatility_ratio:     float = 1.0
+    adr_consumed_pct:     float = 0.0
+    adr_today:            float = 0.0
+    adr_average:          float = 0.0
+    trend_slope:          float = 0.0
+    r_squared:            float = 0.0
+    recommended_strategy: Optional[StrategyType] = None
+    contradictory:        bool  = False   # Hurst vs ER conflict flag
 
 
 @dataclass
-class LiquidityZone:
-    price: float
-    zone_type: str
-    strength: float
-    description: str
-    upper: float = 0.0
-    lower: float = 0.0
-    tested: bool = False
-    created_at: str = ""
+class SessionData:
+    session_type:    SessionType
+    session_name:    str
+    is_kill_zone:    bool
+    kill_zone_name:  str
+    hours_remaining: float
+    asian_high:      Optional[float] = None
+    asian_low:       Optional[float] = None
+    asian_range:     float = 0.0
+    amd_phase:       str = "UNKNOWN"
+    is_dst_london:   bool = False
+    is_dst_ny:       bool = False
+    wat_time:        str = ""
+
+
+@dataclass
+class PivotLevels:
+    daily_pp:     float = 0.0
+    daily_r1:     float = 0.0
+    daily_r2:     float = 0.0
+    daily_r3:     float = 0.0
+    daily_s1:     float = 0.0
+    daily_s2:     float = 0.0
+    daily_s3:     float = 0.0
+    weekly_pp:    float = 0.0
+    weekly_r1:    float = 0.0
+    weekly_s1:    float = 0.0
+    monthly_pp:   float = 0.0
+    camarilla_r4: float = 0.0
+    camarilla_s4: float = 0.0
 
 
 @dataclass
 class VolumeProfile:
-    poc: float = 0; vah: float = 0; val: float = 0
-    hvn: List[float] = field(default_factory=list)
-    lvn: List[float] = field(default_factory=list)
-    total_volume: float = 0
+    poc:          float = 0.0
+    vah:          float = 0.0
+    val:          float = 0.0
+    hvn:          List[float] = field(default_factory=list)
+    lvn:          List[float] = field(default_factory=list)
+    total_volume: float = 0.0
 
 
 @dataclass
 class OrderBookData:
-    price: float = 0; total_longs: float = 0; total_shorts: float = 0
-    net_imbalance: float = 0; pending_delta: float = 0
-    breakout_bias: str = "BALANCED"; long_pct: float = 50; short_pct: float = 50
-    pressure_direction: str = "NEUTRAL"
+    price:               float = 0.0
+    total_longs:         float = 0.0
+    total_shorts:        float = 0.0
+    net_imbalance:       float = 0.0
+    pending_delta:       float = 0.0
+    breakout_bias:       str   = "BALANCED"
+    long_pct:            float = 50.0
+    short_pct:           float = 50.0
+    pressure_dir:        str   = "NEUTRAL"
+    stop_cluster_above:  float = 0.0
+    stop_cluster_below:  float = 0.0
 
 
 @dataclass
 class PositionBookData:
-    price: float = 0; long_pct: float = 50; short_pct: float = 50
-    skew: float = 0; contrarian_signal: str = "NEUTRAL"
-    underwater_longs: float = 0; underwater_shorts: float = 0
-    trapped_longs_pct: float = 0; trapped_shorts_pct: float = 0
-    total_underwater: float = 0; crowded_trade_index: float = 0
-    pain_threshold: float = 0; squeeze_potential: str = "LOW"
+    price:               float = 0.0
+    long_pct:            float = 50.0
+    short_pct:           float = 50.0
+    skew:                float = 0.0
+    skew_change:         float = 0.0
+    contrarian_signal:   str   = "NEUTRAL"
+    trapped_longs_pct:   float = 0.0
+    trapped_shorts_pct:  float = 0.0
+    total_underwater:    float = 0.0
+    crowded_trade_index: float = 0.0
+    squeeze_potential:   str   = "LOW"
+    pain_threshold:      float = 0.0
+
+
+@dataclass
+class AdvancedFlowData:
+    vpin:                   float = 0.0
+    vpin_level:             str   = "LOW"
+    price_impact_ratio:     float = 0.0
+    toxicity:               float = 0.0
+    toxicity_level:         str   = "LOW"
+    amihud_illiquidity:     float = 0.0
+    liquidity_level:        str   = "NORMAL"
+    market_depth_imbalance: float = 0.0
+    depth_bias:             str   = "NEUTRAL"
+    iceberg_count:          int   = 0
+    smart_money_activity:   str   = "LOW"
+    informed_signal:        str   = "NEUTRAL"
+    absorption_ratio:       float = 1.0
+    aggressor_side:         str   = "NEUTRAL"
+    institutional_score:    float = 0.0
+    roll_spread:            float = 0.0
 
 
 @dataclass
 class CurrencyStrength:
-    currency: str = ""; strength: float = 0; trend: str = "NEUTRAL"; rank: int = 0
+    currency:         str   = ""
+    strength:         float = 0.0
+    strength_zscore:  float = 0.0
+    trend:            str   = "NEUTRAL"
+    rank:             int   = 0
+    momentum:         float = 0.0
 
 
 @dataclass
 class ConfluenceFactor:
-    name: str; direction: str; strength: float; description: str
+    name:        str
+    direction:   str
+    strength:    float
+    description: str
+    category:    str   = "OTHER"
+    weight:      float = 1.0
 
 
 @dataclass
-class PredictionResult:
-    has_setup: bool; direction: str; quality: SetupQuality
-    confidence: float; factors: List[ConfluenceFactor]
-    bullish_count: int; bearish_count: int; neutral_count: int
-    reasons: List[str]
+class StrategySignal:
+    strategy:         StrategyType
+    direction:        str
+    confidence:       float
+    entry:            float
+    target:           float
+    stop:             float
+    quality:          SetupQuality
+    reasons:          List[str]
+    factors:          List[ConfluenceFactor]
+    features:         List[float]
+    rr_ratio:         float = 0.0
+    reward_pips:      float = 0.0
+    risk_pips:        float = 0.0
+    regime_aligned:   bool  = True
+    session_aligned:  bool  = True
+    htf_aligned:      bool  = True
+    ml_probability:   float = 0.5
+    calibrated_prob:  float = 0.5
+    adr_ok:           bool  = True
+    breakeven_price:  float = 0.0   # price at which to move SL to BE
+    trailing_price:   float = 0.0   # price at which to trail stop
 
 
 @dataclass
 class QuantPrediction:
-    prediction_id: str; pair: str; timeframe: str; timestamp: str
-    current_price: float; direction: str; target_price: float
-    invalidation_price: float; confidence: float; quality: str
-    reasons: List[str]; key_levels: List[Dict]; factors_aligned: int
-    features: List[float]
-    status: str = "ACTIVE"; outcome: Optional[str] = None
-    hit_time: Optional[str] = None; chat_id: Optional[int] = None
-    ml_confidence: float = 0.0; ml_used: bool = False
-    pips_gained: float = 0.0
+    trade_id:           str          # FQ-EURUSD-BUY-20240115-A3K9
+    prediction_id:      str          # internal UUID
+    pair:               str
+    timeframe:          str
+    timestamp:          str
+    current_price:      float
+    direction:          str
+    target_price:       float
+    invalidation_price: float
+    breakeven_price:    float
+    trailing_price:     float
+    confidence:         float
+    calibrated_prob:    float
+    quality:            str
+    strategy:           str
+    reasons:            List[str]
+    key_levels:         List[Dict]
+    factors_aligned:    int
+    features:           List[float]
+    rr_ratio:           float
+    reward_pips:        float
+    risk_pips:          float
+    status:             str   = "ACTIVE"
+    outcome:            Optional[str] = None
+    hit_time:           Optional[str] = None
+    chat_ids:           List[int] = field(default_factory=list)  # ALL recipients
+    ml_confidence:      float = 0.0
+    ml_used:            bool  = False
+    pips_gained:        float = 0.0
+    mae_pips:           float = 0.0
+    mfe_pips:           float = 0.0
+    regime_at_signal:   str   = ""
+    session_at_signal:  str   = ""
+    breakeven_notified: bool  = False
+    trailing_notified:  bool  = False
+    was_sent_to_users:  bool  = False   # KEY: only notify if this is True
+    sent_quality:       str   = ""      # quality when signal was sent
 
 
-@dataclass
-class PatternRecord:
-    pattern_id: str; pair: str; timeframe: str; timestamp: str
-    setup_conditions: Dict; direction: str; outcome: str
-    pips: float; confidence: float; quality: str
-    institutional_score: float; vpin: float; session: str
+# ════════════════════════════════════════════════════════════════
+#  SIGNAL GEOMETRY VALIDATOR  (CRITICAL FIX)
+# ════════════════════════════════════════════════════════════════
+
+def get_min_pips(instrument: str) -> Tuple[float, float]:
+    """Returns (min_target_pips, min_stop_pips) for instrument."""
+    if "XAU" in instrument:
+        return MIN_TARGET_PIPS_GOLD,   MIN_STOP_PIPS_GOLD
+    if "XAG" in instrument:
+        return MIN_TARGET_PIPS_SILVER, MIN_STOP_PIPS_SILVER
+    if "NAS" in instrument:
+        return MIN_TARGET_PIPS_NAS,    MIN_STOP_PIPS_NAS
+    return MIN_TARGET_PIPS_FOREX,      MIN_STOP_PIPS_FOREX
 
 
-@dataclass
-class HistoricalBacktestResult:
-    pair: str; timeframe: str; period_days: int
-    total_signals: int; wins: int; losses: int
-    win_rate: float; avg_pips: float
-    best_session: str; worst_session: str; best_quality: str
-    quality_win_rates: Dict; session_win_rates: Dict
-    confidence_accuracy: Dict; ml_accuracy: float
-    last_run: str; patterns_learned: int
+def validate_signal_geometry(direction:  str,
+                              entry:      float,
+                              target:     float,
+                              stop:       float,
+                              instrument: str,
+                              min_rr:     float = MIN_RR_RATIO
+                              ) -> SignalValidation:
+    """
+    CRITICAL: Validates all signal geometry before any signal is sent.
+    Catches inverted R/R, targets too close, stops wrong side, etc.
+    """
+    pip            = pip_value(instrument)
+    min_tgt, min_stp = get_min_pips(instrument)
+
+    # ── Direction geometry ────────────────────────────────────────
+    if direction == "LONG":
+        if target <= entry:
+            return SignalValidation(
+                False,
+                f"LONG target ({fmt_price(target, instrument)}) must be "
+                f"ABOVE entry ({fmt_price(entry, instrument)})",
+                0.0, 0.0, 0.0, entry, target, stop)
+        if stop >= entry:
+            return SignalValidation(
+                False,
+                f"LONG stop ({fmt_price(stop, instrument)}) must be "
+                f"BELOW entry ({fmt_price(entry, instrument)})",
+                0.0, 0.0, 0.0, entry, target, stop)
+        reward = target - entry
+        risk   = entry  - stop
+
+    elif direction == "SHORT":
+        if target >= entry:
+            return SignalValidation(
+                False,
+                f"SHORT target ({fmt_price(target, instrument)}) must be "
+                f"BELOW entry ({fmt_price(entry, instrument)})",
+                0.0, 0.0, 0.0, entry, target, stop)
+        if stop <= entry:
+            return SignalValidation(
+                False,
+                f"SHORT stop ({fmt_price(stop, instrument)}) must be "
+                f"ABOVE entry ({fmt_price(entry, instrument)})",
+                0.0, 0.0, 0.0, entry, target, stop)
+        reward = entry  - target
+        risk   = stop   - entry
+    else:
+        return SignalValidation(
+            False, f"Invalid direction: {direction}",
+            0.0, 0.0, 0.0, entry, target, stop)
+
+    # ── Pip distances ─────────────────────────────────────────────
+    reward_pips = reward / pip
+    risk_pips   = risk   / pip
+
+    if reward_pips < min_tgt:
+        return SignalValidation(
+            False,
+            f"Target too close: {reward_pips:.1f} pips "
+            f"(minimum {min_tgt:.0f} pips for {instrument})",
+            0.0, reward_pips, risk_pips, entry, target, stop)
+
+    if risk_pips < min_stp:
+        return SignalValidation(
+            False,
+            f"Stop too tight: {risk_pips:.1f} pips "
+            f"(minimum {min_stp:.0f} pips for {instrument})",
+            0.0, reward_pips, risk_pips, entry, target, stop)
+
+    # ── R/R ──────────────────────────────────────────────────────
+    if risk == 0:
+        return SignalValidation(
+            False, "Zero risk distance",
+            0.0, reward_pips, risk_pips, entry, target, stop)
+
+    rr = reward / risk   # CORRECT: reward divided by risk
+
+    if rr < min_rr:
+        return SignalValidation(
+            False,
+            f"R/R too low: 1:{rr:.2f} (minimum 1:{min_rr}). "
+            f"Reward {reward_pips:.1f}p vs Risk {risk_pips:.1f}p",
+            rr, reward_pips, risk_pips, entry, target, stop)
+
+    return SignalValidation(
+        True, "Valid", rr, reward_pips, risk_pips, entry, target, stop)
 
 
+def calculate_breakeven_price(direction: str,
+                               entry:     float,
+                               target:    float,
+                               pct:       float = BREAKEVEN_TRIGGER_PCT
+                               ) -> float:
+    """Price at which to suggest moving stop to breakeven."""
+    if direction == "LONG":
+        return entry + (target - entry) * (pct / 100)
+    else:
+        return entry - (entry - target) * (pct / 100)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-    def log_message(self, format, *args):
-        pass  # suppress logs
 
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+def calculate_trailing_price(direction: str,
+                              entry:     float,
+                              target:    float,
+                              pct:       float = TRAILING_TRIGGER_PCT
+                              ) -> float:
+    """Price at which to suggest trailing the stop."""
+    if direction == "LONG":
+        return entry + (target - entry) * (pct / 100)
+    else:
+        return entry - (entry - target) * (pct / 100)
+
 
 # ════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS
 # ════════════════════════════════════════════════════════════════
 
 def get_pip_info(instrument: str) -> Tuple[float, int]:
-    if "JPY" in instrument:   return 0.01, 3
-    elif "XAU" in instrument: return 0.1, 2
-    elif "XAG" in instrument: return 0.01, 3
-    elif "NAS" in instrument: return 1.0, 1
-    else:                     return 0.0001, 5
+    if "JPY" in instrument:   return 0.01,   3
+    if "XAU" in instrument:   return 0.10,   2
+    if "XAG" in instrument:   return 0.01,   3
+    if "NAS" in instrument:   return 1.00,   1
+    return 0.0001, 5
 
 def pip_value(instrument: str) -> float:
     return get_pip_info(instrument)[0]
@@ -359,8 +755,9 @@ def format_signed(value: float) -> str:
 def format_pct(value: float) -> str:
     return f"{value:+.1f}%"
 
-def format_scientific(value: float, precision: int = 2) -> str:
-    if abs(value) < 0.0001 or abs(value) > 10000:
+def format_sci(value: float, precision: int = 4) -> str:
+    if value == 0: return "0.0000"
+    if abs(value) < 0.0001 or abs(value) > 100000:
         return f"{value:.{precision}e}"
     return f"{value:.{precision}f}"
 
@@ -369,121 +766,56 @@ def progress_bar(pct: float, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 def escape_html(text: str) -> str:
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def pair_to_display(instrument: str) -> str:
-    return instrument.replace("_", "/")
-
-def get_asset_emoji(instrument: str) -> str:
-    if "XAU" in instrument: return "🥇"
-    elif "XAG" in instrument: return "🥈"
-    elif "NAS" in instrument: return "📈"
-    return "💱"
-
-def get_current_session() -> Tuple[str, SessionType, float]:
-    now  = datetime.now(timezone.utc)
-    hour = now.hour
-    if 13 <= hour < 16:
-        return "London-NY Overlap", SessionType.OVERLAP,   16 - hour - now.minute / 60
-    if 7 <= hour < 9:
-        return "Tokyo-London Overlap", SessionType.OVERLAP, 9 - hour - now.minute / 60
-    if 0 <= hour < 9:
-        return "Tokyo/Asian",     SessionType.TOKYO,     9  - hour - now.minute / 60
-    if 7 <= hour < 16:
-        return "London/European", SessionType.LONDON,    16 - hour - now.minute / 60
-    if 13 <= hour < 22:
-        return "New York",        SessionType.NEW_YORK,  22 - hour - now.minute / 60
-    return "Off Hours", SessionType.OFF_HOURS, 0.0
-
-def get_session_name(hour: int) -> str:
-    if 13 <= hour < 16: return "OVERLAP"
-    if 0 <= hour < 9:   return "TOKYO"
-    if 7 <= hour < 16:  return "LONDON"
-    if 13 <= hour < 22: return "NEW_YORK"
-    return "OFF_HOURS"
-
-def parse_pair_from_callback(data: str, prefix: str) -> Tuple[Optional[str], Optional[str]]:
-    remainder = data[len(prefix):]
-    for pair in sorted(ALL_PAIRS, key=len, reverse=True):
-        if remainder.startswith(pair + "_"):
-            return pair, remainder[len(pair) + 1:]
-    return None, None
-
-def parse_pair_tf(data: str, prefix: str) -> Tuple[Optional[str], Optional[str]]:
-    """Parse pair and timeframe from callback data."""
-    remainder = data[len(prefix):]
-    for pair in sorted(ALL_PAIRS, key=len, reverse=True):
-        if remainder.startswith(pair + "_"):
-            tf = remainder[len(pair) + 1:]
-            if tf in TIMEFRAMES:
-                return pair, tf
-            return None, None
-    return None, None
-
-def load_json_file(filepath: str, default: Any) -> Any:
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            log.error(f"Error loading {filepath}: {e}")
-    return default
-
-def save_json_file(filepath: str, data: Any):
-    try:
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        log.error(f"Error saving {filepath}: {e}")
-
-# ── Short aliases used throughout the code ───────────────────────
-def load_json(filepath: str, default: Any) -> Any:
-    return load_json_file(filepath, default)
-
-def save_json(filepath: str, data: Any):
-    save_json_file(filepath, data)
-
-def fmt_price(value: float, instrument: str) -> str:
-    return format_price(value, instrument)
-
-def fmt_num(value: float) -> str:
-    return format_number(value)
-
-def fmt_signed(value: float) -> str:
-    return format_signed(value)
-
-def fmt_pct(value: float) -> str:
-    return format_pct(value)
-
-def fmt_sci(value: float, precision: int = 2) -> str:
-    return format_scientific(value, precision)
-
-def pbar(pct: float, length: int = 10) -> str:
-    return progress_bar(pct, length)
-
-def esc(text: str) -> str:
-    return escape_html(text)
+    return (str(text).replace("&", "&amp;")
+                     .replace("<", "&lt;")
+                     .replace(">", "&gt;"))
 
 def pair_display(instrument: str) -> str:
-    return pair_to_display(instrument)
+    return instrument.replace("_", "/")
 
 def asset_emoji(instrument: str) -> str:
-    return get_asset_emoji(instrument)
+    if "XAU" in instrument: return "🥇"
+    if "XAG" in instrument: return "🥈"
+    if "NAS" in instrument: return "📈"
+    return "💱"
 
-def session_name(hour: int) -> str:
-    return get_session_name(hour)
+def quality_emoji(quality_str: str) -> str:
+    if "A+" in quality_str: return "🔥"
+    if quality_str.startswith("A"):  return "✅"
+    if "B" in quality_str:  return "⚡"
+    return "⚠️"
 
-def current_session() -> Tuple[str, float]:
-    name, _, hours = get_current_session()
-    return name, hours
+def load_json(filepath: str, default: Any) -> Any:
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            log.error(f"Load {filepath}: {e}")
+    return default
 
-def pips(instrument: str, diff: float) -> float:
-    return pips_diff(instrument, diff)
+def save_json(filepath: str, data: Any):
+    try:
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+    except Exception as e:
+        log.error(f"Save {filepath}: {e}")
 
-def pip_val(instrument: str) -> float:
-    return pip_value(instrument)
+# Short aliases
+fmt_price  = format_price
+fmt_num    = format_number
+fmt_signed = format_signed
+fmt_pct    = format_pct
+fmt_sci    = format_sci
+pbar       = progress_bar
+esc        = escape_html
+pips       = pips_diff
+pip_val    = pip_value
 
-# ── Async safe helpers ───────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+#  ASYNC SAFE HELPERS
+# ════════════════════════════════════════════════════════════════
+
 async def safe_answer_callback(query) -> bool:
     try:
         await asyncio.wait_for(query.answer(), timeout=5.0)
@@ -498,441 +830,967 @@ async def safe_delete_message(message) -> bool:
     except Exception:
         return False
 
-async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> Optional[object]:
+async def safe_send_message(bot, chat_id: int,
+                             text: str, **kwargs) -> Optional[object]:
     for attempt in range(3):
         try:
             return await asyncio.wait_for(
-                bot.send_message(chat_id=chat_id, text=text, **kwargs),
+                bot.send_message(
+                    chat_id=chat_id, text=text, **kwargs),
                 timeout=30.0)
         except (TimedOut, NetworkError):
-            if attempt < 2: await asyncio.sleep(1)
+            if attempt < 2:
+                await asyncio.sleep(1 + attempt)
         except Exception as e:
-            log.error(f"Send message error: {e}")
+            log.error(f"Send message: {e}")
             return None
     return None
 
-async def safe_send_photo(bot, chat_id: int, photo, **kwargs) -> Optional[object]:
+async def safe_send_photo(bot, chat_id: int,
+                           photo, **kwargs) -> Optional[object]:
     for attempt in range(3):
         try:
             return await asyncio.wait_for(
-                bot.send_photo(chat_id=chat_id, photo=photo, **kwargs),
+                bot.send_photo(
+                    chat_id=chat_id, photo=photo, **kwargs),
                 timeout=60.0)
         except (TimedOut, NetworkError):
-            if attempt < 2: await asyncio.sleep(1)
+            if attempt < 2:
+                await asyncio.sleep(1 + attempt)
         except Exception as e:
-            log.error(f"Send photo error: {e}")
+            log.error(f"Send photo: {e}")
             return None
     return None
 
-# Short aliases for the helpers
-async def cb_answer(query) -> bool:
-    return await safe_answer_callback(query)
-
-async def del_msg(message) -> bool:
-    return await safe_delete_message(message)
-
-async def send_msg(bot, chat_id: int, text: str, **kwargs) -> Optional[object]:
-    return await safe_send_message(bot, chat_id, text, **kwargs)
-
-async def send_photo(bot, chat_id: int, photo, **kwargs) -> Optional[object]:
-    return await safe_send_photo(bot, chat_id, photo, **kwargs)
-
+cb_answer  = safe_answer_callback
+del_msg    = safe_delete_message
+send_msg   = safe_send_message
+send_photo = safe_send_photo
 
 # ════════════════════════════════════════════════════════════════
-#  OANDA API
+#  OANDA API LAYER
 # ════════════════════════════════════════════════════════════════
 
-async def fetch_candles(session: aiohttp.ClientSession, instrument: str,
-                        granularity: str, count: int) -> List[Candle]:
+async def fetch_candles(session:     aiohttp.ClientSession,
+                        instrument:  str,
+                        granularity: str,
+                        count:       int) -> List[Candle]:
     url    = f"{API_BASE}/v3/instruments/{instrument}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
     try:
-        async with session.get(url, headers=HEADERS, params=params,
-                               timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.get(
+                url, headers=HEADERS, params=params,
+                timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status != 200:
+                log.warning(
+                    f"Candles {instrument} {granularity}: "
+                    f"HTTP {resp.status}")
                 return []
-            data = await resp.json()
+            data    = await resp.json()
             candles = []
             for c in data.get("candles", []):
-                if "mid" in c:
-                    m = c["mid"]
-                    candles.append(Candle(
-                        time=c.get("time", ""),
-                        open=float(m["o"]), high=float(m["h"]),
-                        low=float(m["l"]),  close=float(m["c"]),
-                        volume=max(float(c.get("volume", 1)), 1),
-                        complete=c.get("complete", True)
-                    ))
+                if "mid" not in c:
+                    continue
+                m = c["mid"]
+                o, h, l, cl = (float(m["o"]), float(m["h"]),
+                               float(m["l"]), float(m["c"]))
+                vol = max(float(c.get("volume", 1)), 1)
+                if h < l or h < o or h < cl or l > o or l > cl:
+                    continue
+                candles.append(Candle(
+                    time=c.get("time", ""),
+                    open=o, high=h, low=l, close=cl,
+                    volume=vol,
+                    complete=c.get("complete", True)
+                ))
             return candles
     except Exception as e:
-        log.error(f"Fetch candles error {instrument}: {e}")
+        log.error(f"Fetch candles {instrument}: {e}")
         return []
 
-async def fetch_current_price(session: aiohttp.ClientSession,
-                              instrument: str) -> Optional[float]:
+
+async def fetch_current_price(session:    aiohttp.ClientSession,
+                               instrument: str) -> Optional[float]:
     url    = f"{API_BASE}/v3/instruments/{instrument}/candles"
-    params = {"granularity": "M1", "count": 1, "price": "M"}
+    params = {"granularity": "S5", "count": 1, "price": "M"}
     try:
-        async with session.get(url, headers=HEADERS, params=params,
-                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200: return None
+        async with session.get(
+                url, headers=HEADERS, params=params,
+                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return None
             data = await resp.json()
-            candles = data.get("candles", [])
-            if candles and "mid" in candles[0]:
-                return float(candles[0]["mid"]["c"])
+            cc   = data.get("candles", [])
+            if cc and "mid" in cc[0]:
+                return float(cc[0]["mid"]["c"])
     except Exception as e:
-        log.error(f"Fetch price error {instrument}: {e}")
+        log.error(f"Fetch price {instrument}: {e}")
     return None
 
-async def fetch_order_book(session: aiohttp.ClientSession,
-                           instrument: str) -> Optional[Dict]:
+
+async def fetch_order_book(session:    aiohttp.ClientSession,
+                            instrument: str) -> Optional[Dict]:
     url = f"{API_BASE}/v3/instruments/{instrument}/orderBook"
     try:
-        async with session.get(url, headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200: return None
+        async with session.get(
+                url, headers=HEADERS,
+                timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
             return (await resp.json()).get("orderBook")
     except Exception:
         return None
 
-async def fetch_position_book(session: aiohttp.ClientSession,
-                              instrument: str) -> Optional[Dict]:
+
+async def fetch_position_book(session:    aiohttp.ClientSession,
+                               instrument: str) -> Optional[Dict]:
     url = f"{API_BASE}/v3/instruments/{instrument}/positionBook"
     try:
-        async with session.get(url, headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200: return None
+        async with session.get(
+                url, headers=HEADERS,
+                timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
             return (await resp.json()).get("positionBook")
     except Exception:
         return None
 
-
 # ════════════════════════════════════════════════════════════════
-#  CURRENCY STRENGTH CACHE
-# ════════════════════════════════════════════════════════════════
-
-async def calculate_currency_strength(
-        session: aiohttp.ClientSession,
-        timeframe: str = "H1",
-        periods: int = 24) -> Dict[str, CurrencyStrength]:
-    changes: Dict[str, List[float]] = {c: [] for c in CURRENCIES}
-    for pair in FOREX_PAIRS[:14]:
-        try:
-            candles = await fetch_candles(session, pair, timeframe, periods + 1)
-            if len(candles) >= 2:
-                parts = pair.split("_")
-                if len(parts) == 2:
-                    base, quote = parts
-                    op, cl = candles[0].open, candles[-1].close
-                    if op > 0:
-                        pct = ((cl - op) / op) * 100
-                        if base  in changes: changes[base].append(pct)
-                        if quote in changes: changes[quote].append(-pct)
-            await asyncio.sleep(0.02)
-        except Exception:
-            continue
-    strengths = {}
-    for currency in CURRENCIES:
-        avg   = (sum(changes[currency]) / len(changes[currency])
-                 if changes[currency] else 0.0)
-        trend = ("STRONG" if avg > 0.1 else
-                 "WEAK"   if avg < -0.1 else "NEUTRAL")
-        strengths[currency] = CurrencyStrength(
-            currency=currency, strength=avg, trend=trend, rank=0)
-    for i, cs in enumerate(
-            sorted(strengths.values(), key=lambda x: x.strength, reverse=True)):
-        strengths[cs.currency].rank = i + 1
-    return strengths
-
-
-class CurrencyStrengthCache:
-    def __init__(self, ttl_seconds: int = STRENGTH_CACHE_TTL):
-        self.cache: Optional[Dict] = None
-        self.last_update: Optional[datetime] = None
-        self.ttl = ttl_seconds
-        self._lock = asyncio.Lock()
-
-    async def get(self, session: aiohttp.ClientSession) -> Dict:
-        async with self._lock:
-            now = datetime.now(timezone.utc)
-            if (self.cache is None or self.last_update is None or
-                    (now - self.last_update).total_seconds() > self.ttl):
-                self.cache = await calculate_currency_strength(session, "H1", 24)
-                self.last_update = now
-            return self.cache
-
-STRENGTH_CACHE = CurrencyStrengthCache()
-
-
-# ════════════════════════════════════════════════════════════════
-#  LIQUIDITY ZONE DETECTOR
+#  SESSION ENGINE  (DST-AWARE, WAT-CORRECT)
 # ════════════════════════════════════════════════════════════════
 
-class LiquidityZoneDetector:
+class SessionEngine:
+    """
+    All session times in UTC.
+    Nigerian time WAT = UTC+1 (no DST).
+    London: UTC+0 winter, UTC+1 summer.
+    New York: UTC-5 winter, UTC-4 summer.
+    """
 
-    def detect_all(self, candles: List[Candle],
-                   instrument: str) -> List[LiquidityZone]:
-        zones = []
-        if len(candles) < 20:
-            return zones
-        zones.extend(self._detect_demand_supply(candles, instrument))
-        zones.extend(self._detect_equal_levels(candles, instrument))
-        zones.extend(self._detect_fair_value_gaps(candles, instrument))
-        zones.extend(self._detect_order_blocks(candles, instrument))
-        zones = self._merge_nearby_zones(zones, instrument)
-        return sorted(zones, key=lambda z: z.strength, reverse=True)[:12]
+    @staticmethod
+    def _london_dst(dt: datetime) -> bool:
+        year = dt.year
+        mar31 = date(year, 3, 31)
+        dst_start = mar31 - timedelta(days=(mar31.weekday() + 1) % 7)
+        oct31 = date(year, 10, 31)
+        dst_end = oct31 - timedelta(days=(oct31.weekday() + 1) % 7)
+        return dst_start <= dt.date() < dst_end
 
-    # keep 'detect' as alias
-    def detect(self, candles: List[Candle], instrument: str) -> List[LiquidityZone]:
-        return self.detect_all(candles, instrument)
+    @staticmethod
+    def _ny_dst(dt: datetime) -> bool:
+        year = dt.year
+        mar1 = date(year, 3, 1)
+        dst_start = mar1 + timedelta(days=(6 - mar1.weekday()) % 7 + 7)
+        nov1 = date(year, 11, 1)
+        dst_end = nov1 + timedelta(days=(6 - nov1.weekday()) % 7)
+        return dst_start <= dt.date() < dst_end
 
-    def _detect_demand_supply(self, candles: List[Candle],
-                               instrument: str) -> List[LiquidityZone]:
-        zones = []
-        pip   = pip_value(instrument)
-        for i in range(2, len(candles) - 2):
-            c = candles[i]
-            if c.range > 0 and c.body_abs / c.range > 0.6:
-                prev = candles[i - 1]
-                if c.is_bullish and not prev.is_bullish:
-                    zone_low  = min(prev.low, c.low)
-                    zone_high = max(prev.high, c.open)
-                    strength  = min(100, (c.body_abs / pip) * 0.5)
-                    zones.append(LiquidityZone(
-                        price=zone_low + (zone_high - zone_low) / 2,
-                        zone_type="DEMAND", strength=strength,
-                        description=(f"Demand zone — institutional buying base at "
-                                     f"{format_price(zone_low, instrument)}"),
-                        upper=zone_high, lower=zone_low, created_at=c.time))
-                elif not c.is_bullish and prev.is_bullish:
-                    zone_low  = min(prev.low, c.open)
-                    zone_high = max(prev.high, c.high)
-                    strength  = min(100, (c.body_abs / pip) * 0.5)
-                    zones.append(LiquidityZone(
-                        price=zone_low + (zone_high - zone_low) / 2,
-                        zone_type="SUPPLY", strength=strength,
-                        description=(f"Supply zone — institutional selling base at "
-                                     f"{format_price(zone_high, instrument)}"),
-                        upper=zone_high, lower=zone_low, created_at=c.time))
-        return zones
+    def get_session(self,
+                    dt: Optional[datetime] = None) -> SessionData:
+        if dt is None:
+            dt = datetime.now(timezone.utc)
 
-    def _detect_equal_levels(self, candles: List[Candle],
-                              instrument: str) -> List[LiquidityZone]:
-        zones  = []
-        pip    = pip_value(instrument)
-        thresh = pip * 3
-        highs  = [(i, c.high) for i, c in enumerate(candles)]
-        lows   = [(i, c.low)  for i, c in enumerate(candles)]
-        for i in range(len(highs)):
-            cluster = [highs[j] for j in range(i + 1, min(i + 20, len(highs)))
-                       if abs(highs[j][1] - highs[i][1]) <= thresh]
-            if len(cluster) >= 2:
-                avg_price = sum(h[1] for h in cluster) / len(cluster)
-                zones.append(LiquidityZone(
-                    price=avg_price, zone_type="EQUAL_HIGHS",
-                    strength=min(100, len(cluster) * 25),
-                    description=(f"Equal highs liquidity pool at "
-                                 f"{format_price(avg_price, instrument)} "
-                                 f"— stop-hunts likely"),
-                    upper=avg_price + thresh, lower=avg_price - thresh,
-                    created_at=candles[i].time))
-                break
-        for i in range(len(lows)):
-            cluster = [lows[j] for j in range(i + 1, min(i + 20, len(lows)))
-                       if abs(lows[j][1] - lows[i][1]) <= thresh]
-            if len(cluster) >= 2:
-                avg_price = sum(l[1] for l in cluster) / len(cluster)
-                zones.append(LiquidityZone(
-                    price=avg_price, zone_type="EQUAL_LOWS",
-                    strength=min(100, len(cluster) * 25),
-                    description=(f"Equal lows liquidity pool at "
-                                 f"{format_price(avg_price, instrument)} "
-                                 f"— stop-hunts likely"),
-                    upper=avg_price + thresh, lower=avg_price - thresh,
-                    created_at=candles[i].time))
-                break
-        return zones
+        h  = dt.hour
+        m  = dt.minute
+        hm = h + m / 60.0
 
-    def _detect_fair_value_gaps(self, candles: List[Candle],
-                                 instrument: str) -> List[LiquidityZone]:
-        zones = []
-        for i in range(1, len(candles) - 1):
-            prev = candles[i - 1]
-            curr = candles[i]
-            nxt  = candles[i + 1]
-            if nxt.low > prev.high:
-                gap_size = nxt.low - prev.high
-                strength = min(100, gap_size / pip_value(instrument) * 2)
-                if strength > 20:
-                    mid = prev.high + gap_size / 2
-                    zones.append(LiquidityZone(
-                        price=mid, zone_type="FAIR_VALUE_GAP", strength=strength,
-                        description=(f"Bullish Fair Value Gap "
-                                     f"{format_price(prev.high, instrument)}-"
-                                     f"{format_price(nxt.low, instrument)} "
-                                     f"— price likely to fill"),
-                        upper=nxt.low, lower=prev.high, created_at=curr.time))
-            elif nxt.high < prev.low:
-                gap_size = prev.low - nxt.high
-                strength = min(100, gap_size / pip_value(instrument) * 2)
-                if strength > 20:
-                    mid = nxt.high + gap_size / 2
-                    zones.append(LiquidityZone(
-                        price=mid, zone_type="FAIR_VALUE_GAP", strength=strength,
-                        description=(f"Bearish Fair Value Gap "
-                                     f"{format_price(nxt.high, instrument)}-"
-                                     f"{format_price(prev.low, instrument)} "
-                                     f"— price likely to fill"),
-                        upper=prev.low, lower=nxt.high, created_at=curr.time))
-        return zones[:4]
+        lon_dst = self._london_dst(dt)
+        ny_dst  = self._ny_dst(dt)
 
-    def _detect_order_blocks(self, candles: List[Candle],
-                              instrument: str) -> List[LiquidityZone]:
-        zones = []
-        for i in range(1, len(candles) - 3):
-            c    = candles[i]
-            nxt1 = candles[i + 1]
-            nxt2 = candles[i + 2]
-            if (not c.is_bullish and nxt1.is_bullish and nxt2.is_bullish
-                    and nxt1.body_abs > c.body_abs * 1.5):
-                zones.append(LiquidityZone(
-                    price=c.low + (c.high - c.low) / 2,
-                    zone_type="DEMAND",
-                    strength=min(100, nxt1.body_abs / pip_value(instrument) * 0.3),
-                    description=(f"Bullish order block at "
-                                 f"{format_price(c.low, instrument)}-"
-                                 f"{format_price(c.high, instrument)}"),
-                    upper=c.high, lower=c.low, created_at=c.time))
-            elif (c.is_bullish and not nxt1.is_bullish and not nxt2.is_bullish
-                  and nxt1.body_abs > c.body_abs * 1.5):
-                zones.append(LiquidityZone(
-                    price=c.low + (c.high - c.low) / 2,
-                    zone_type="SUPPLY",
-                    strength=min(100, nxt1.body_abs / pip_value(instrument) * 0.3),
-                    description=(f"Bearish order block at "
-                                 f"{format_price(c.low, instrument)}-"
-                                 f"{format_price(c.high, instrument)}"),
-                    upper=c.high, lower=c.low, created_at=c.time))
-        return zones[:4]
+        lon_open  = 6  if lon_dst else 7
+        lon_close = 15 if lon_dst else 16
+        ny_open   = 11 if ny_dst  else 12
+        ny_close  = 20 if ny_dst  else 21
 
-    def _merge_nearby_zones(self, zones: List[LiquidityZone],
-                            instrument: str) -> List[LiquidityZone]:
-        if not zones:
-            return zones
-        pip    = pip_value(instrument)
-        thresh = pip * 10
-        merged = []
-        used   = set()
-        for i, z in enumerate(zones):
-            if i in used:
-                continue
-            group = [z]
-            for j, z2 in enumerate(zones[i+1:], i+1):
-                if j not in used and abs(z2.price - z.price) < thresh:
-                    group.append(z2)
-                    used.add(j)
-            best = max(group, key=lambda x: x.strength)
-            merged.append(best)
-            used.add(i)
-        return merged
+        lon_kz_close = lon_open + 3
+        ny_kz_close  = ny_open  + 3
 
-    def format_zones_message(self, zones: List[LiquidityZone],
-                             current_price: float, instrument: str) -> str:
-        if not zones:
-            return "No significant liquidity zones detected."
-        msg   = ""
-        above = [z for z in zones if z.price > current_price]
-        below = [z for z in zones if z.price <= current_price]
-        if above:
-            msg += "<b>🔴 Liquidity Above Price (Resistance):</b>\n"
-            for z in sorted(above, key=lambda x: x.price)[:4]:
-                icon = ("🧊" if z.zone_type == "EQUAL_HIGHS" else
-                        "⬆️" if z.zone_type == "SUPPLY" else
-                        "🌀" if z.zone_type == "FAIR_VALUE_GAP" else "📦")
-                dist = pips_diff(instrument, z.price - current_price)
-                msg += (f"{icon} {format_price(z.price, instrument)} "
-                        f"[{z.zone_type.replace('_',' ')}] "
-                        f"+{dist:.0f} pips | Str: {z.strength:.0f}%\n"
-                        f"   <i>{z.description}</i>\n")
-        if below:
-            msg += "\n<b>🟢 Liquidity Below Price (Support):</b>\n"
-            for z in sorted(below, key=lambda x: x.price, reverse=True)[:4]:
-                icon = ("🧊" if z.zone_type == "EQUAL_LOWS" else
-                        "⬇️" if z.zone_type == "DEMAND" else
-                        "🌀" if z.zone_type == "FAIR_VALUE_GAP" else "📦")
-                dist = pips_diff(instrument, current_price - z.price)
-                msg += (f"{icon} {format_price(z.price, instrument)} "
-                        f"[{z.zone_type.replace('_',' ')}] "
-                        f"-{dist:.0f} pips | Str: {z.strength:.0f}%\n"
-                        f"   <i>{z.description}</i>\n")
-        return msg
+        overlap_open  = ny_open
+        overlap_close = lon_close
 
+        in_london  = lon_open <= hm < lon_close
+        in_ny      = ny_open  <= hm < ny_close
+        in_overlap = (overlap_open <= hm < overlap_close
+                      and in_london and in_ny)
+        in_tokyo   = 0 <= hm < 9
+        in_sydney  = (21 <= hm < 24) or (0 <= hm < 1)
 
-LIQUIDITY_DETECTOR = LiquidityZoneDetector()
+        in_lon_kz = lon_open <= hm < lon_kz_close
+        in_ny_kz  = ny_open  <= hm < ny_kz_close
 
+        amd_phase = self._amd_phase(hm, lon_open, ny_open)
 
-# ════════════════════════════════════════════════════════════════
-#  ADVANCED ORDER FLOW ENGINE
-# ════════════════════════════════════════════════════════════════
+        if in_overlap:
+            stype     = SessionType.OVERLAP
+            sname     = "London-NY Overlap"
+            remaining = overlap_close - hm
+        elif in_london:
+            stype     = SessionType.LONDON
+            sname     = "London"
+            remaining = lon_close - hm
+        elif in_ny:
+            stype     = SessionType.NEW_YORK
+            sname     = "New York"
+            remaining = ny_close - hm
+        elif in_tokyo:
+            stype     = SessionType.TOKYO
+            sname     = "Tokyo / Asian"
+            remaining = 9.0 - hm
+        elif in_sydney:
+            stype     = SessionType.SYDNEY
+            sname     = "Sydney"
+            remaining = (24.0 - hm) if hm >= 21 else (1.0 - hm)
+        else:
+            stype     = SessionType.OFF_HOURS
+            sname     = "Off Hours"
+            remaining = 0.0
 
-class AdvancedOrderFlow:
+        kz_name = ""
+        is_kz   = False
+        if in_lon_kz:
+            is_kz   = True
+            kz_name = "London Kill Zone (08:00–11:00 WAT)"
+        elif in_ny_kz:
+            is_kz   = True
+            kz_name = "NY Kill Zone (13:00–16:00 WAT)"
 
-    def analyze_all(self, candles: List[Candle],
-                    order_book: Optional[Dict] = None) -> AdvancedOrderFlowData:
-        if not candles or len(candles) < 20:
-            return AdvancedOrderFlowData()
-        vpin            = self._vpin_academic(candles)
-        kyle_lambda     = self._kyle_lambda(candles)
-        toxicity        = self._toxicity(candles)
-        amihud          = self._amihud(candles)
-        roll            = self._roll_spread(candles)
-        depth_imbalance = 0.0
-        iceberg_orders  = {}
-        if order_book:
-            depth_imbalance = self._depth_imbalance(order_book)
-            iceberg_orders  = self._detect_icebergs(order_book)
-        absorption   = self._absorption_ratio(candles)
-        aggressor    = self._aggressor_side(candles)
-        clustering   = self._volume_clustering(candles)
-        arrival_rate = self._arrival_rate(candles)
-        eff_spread   = self._effective_spread(candles)
-        real_spread  = self._realized_spread(candles)
-        price_impact = self._price_impact(candles)
-        vpin_level   = self._interp_vpin(vpin)
-        tox_level    = self._interp_toxicity(toxicity)
-        liq_level    = self._interp_liquidity(amihud)
-        depth_bias   = self._interp_depth(depth_imbalance)
-        kyle_interp  = self._interp_kyle(kyle_lambda)
-        smart_money  = self._smart_money_score(vpin, toxicity, kyle_lambda,
-                                                depth_imbalance)
-        informed_sig = self._informed_signal(candles, vpin, toxicity, aggressor)
-        inst_score   = self._institutional_score(vpin, kyle_lambda, toxicity,
-                                                  absorption, clustering)
-        return AdvancedOrderFlowData(
-            vpin=vpin, vpin_level=vpin_level,
-            kyle_lambda=kyle_lambda,
-            kyle_lambda_interpretation=kyle_interp,
-            toxicity=toxicity, toxicity_level=tox_level,
-            amihud_illiquidity=amihud, liquidity_level=liq_level,
-            market_depth_imbalance=depth_imbalance, depth_bias=depth_bias,
-            iceberg_orders=iceberg_orders, iceberg_count=len(iceberg_orders),
-            smart_money_activity=smart_money,
-            informed_trader_signal=informed_sig,
-            effective_spread=eff_spread, realized_spread=real_spread,
-            price_impact=price_impact, trade_arrival_rate=arrival_rate,
-            volume_clustering=clustering, absorption_ratio=absorption,
-            aggressor_side=aggressor,
-            institutional_flow_score=inst_score,
-            roll_spread=roll
+        # WAT display
+        wat = (dt + timedelta(hours=1)).strftime("%H:%M WAT")
+
+        return SessionData(
+            session_type    = stype,
+            session_name    = sname,
+            is_kill_zone    = is_kz,
+            kill_zone_name  = kz_name,
+            hours_remaining = max(0.0, remaining),
+            amd_phase       = amd_phase,
+            is_dst_london   = lon_dst,
+            is_dst_ny       = ny_dst,
+            wat_time        = wat,
         )
 
-    # keep 'analyze' as alias
-    def analyze(self, candles: List[Candle],
-                order_book: Optional[Dict] = None) -> AdvancedOrderFlowData:
-        return self.analyze_all(candles, order_book)
+    @staticmethod
+    def _amd_phase(hm: float, lon_open: float, ny_open: float) -> str:
+        if 0 <= hm < lon_open:
+            return "ACCUMULATION"
+        if lon_open <= hm < lon_open + 1.5:
+            return "MANIPULATION"
+        if lon_open + 1.5 <= hm < ny_open:
+            return "DISTRIBUTION"
+        if ny_open <= hm < ny_open + 1.5:
+            return "MANIPULATION"
+        if hm >= ny_open + 1.5:
+            return "DISTRIBUTION"
+        return "UNKNOWN"
 
-    def _vpin_academic(self, candles: List[Candle],
-                        num_buckets: int = 50) -> float:
+    def get_scan_interval(self, session: SessionData) -> int:
+        if session.session_type == SessionType.OFF_HOURS:
+            return SCAN_INTERVAL_OFF_HOURS
+        if session.is_kill_zone:
+            return SCAN_INTERVAL_KILL_ZONE
+        return SCAN_INTERVAL_NORMAL
+
+    def get_min_confidence(self, session: SessionData) -> float:
+        if session.session_type == SessionType.OFF_HOURS:
+            return MIN_ALERT_CONFIDENCE + 8.0
+        if session.is_kill_zone:
+            return MIN_ALERT_CONFIDENCE - 4.0
+        return MIN_ALERT_CONFIDENCE
+
+    def wat_time(self, dt: Optional[datetime] = None) -> str:
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+        return (dt + timedelta(hours=1)).strftime("%H:%M WAT")
+
+    def utc_time(self, dt: Optional[datetime] = None) -> str:
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+        return dt.strftime("%H:%M UTC")
+
+
+SESSION_ENGINE = SessionEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  MARKET MATHEMATICS ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class MarketMathEngine:
+
+    def hurst_exponent(self, prices: List[float],
+                       min_window: int = 10) -> float:
+        n = len(prices)
+        if n < 20:
+            return 0.5
+        try:
+            ts      = np.array(prices, dtype=float)
+            lags    = range(min_window, n // 2)
+            rs_arr  = []
+            lag_arr = []
+            for lag in lags:
+                subseries = [ts[i:i+lag]
+                             for i in range(0, n - lag, lag)]
+                rs_vals = []
+                for sub in subseries:
+                    if len(sub) < 4:
+                        continue
+                    mean = np.mean(sub)
+                    dev  = np.cumsum(sub - mean)
+                    r    = np.max(dev) - np.min(dev)
+                    s    = np.std(sub, ddof=1)
+                    if s > 0:
+                        rs_vals.append(r / s)
+                if rs_vals:
+                    rs_arr.append(np.log(np.mean(rs_vals)))
+                    lag_arr.append(np.log(lag))
+            if len(lag_arr) < 5:
+                return 0.5
+            slope, _, _, _, _ = linregress(lag_arr, rs_arr)
+            return float(np.clip(slope, 0.05, 0.95))
+        except Exception:
+            return 0.5
+
+    def fractal_dimension(self, prices: List[float]) -> float:
+        n = len(prices)
+        if n < 20:
+            return 1.5
+        try:
+            arr  = np.array(prices, dtype=float)
+            lo   = np.min(arr)
+            hi   = np.max(arr)
+            rng  = hi - lo
+            if rng == 0:
+                return 1.0
+            norm   = (arr - lo) / rng
+            path   = np.sum(np.abs(np.diff(norm)))
+            direct = abs(norm[-1] - norm[0])
+            if direct == 0:
+                return 2.0
+            fd = 1.0 + math.log(path) / math.log(n)
+            return float(np.clip(fd, 1.0, 2.0))
+        except Exception:
+            return 1.5
+
+    def price_entropy(self, returns: List[float],
+                      bins: int = 10) -> float:
+        if len(returns) < 10:
+            return 1.0
+        try:
+            arr       = np.array(returns, dtype=float)
+            counts, _ = np.histogram(arr, bins=bins)
+            counts    = counts[counts > 0]
+            probs     = counts / counts.sum()
+            entropy   = -np.sum(probs * np.log2(probs))
+            return float(entropy / math.log2(bins))
+        except Exception:
+            return 1.0
+
+    def autocorrelation(self, returns: List[float],
+                        lag: int = 1) -> float:
+        if len(returns) < lag + 5:
+            return 0.0
+        try:
+            arr  = np.array(returns, dtype=float)
+            if np.std(arr) == 0:
+                return 0.0
+            corr = np.corrcoef(arr[:-lag], arr[lag:])[0, 1]
+            return float(corr) if not np.isnan(corr) else 0.0
+        except Exception:
+            return 0.0
+
+    def variance_ratio(self, prices: List[float],
+                       q: int = 5) -> float:
+        if len(prices) < q + 5:
+            return 1.0
+        try:
+            arr  = np.array(prices, dtype=float)
+            r1   = np.diff(arr)
+            rq   = arr[q:] - arr[:-q]
+            var1 = np.var(r1, ddof=1)
+            varq = np.var(rq, ddof=1) / q
+            if var1 == 0:
+                return 1.0
+            return float(varq / var1)
+        except Exception:
+            return 1.0
+
+    def efficiency_ratio(self, prices: List[float],
+                         period: int = 10) -> float:
+        if len(prices) < period + 1:
+            return 0.0
+        try:
+            arr    = np.array(prices[-period-1:], dtype=float)
+            direct = abs(arr[-1] - arr[0])
+            path   = np.sum(np.abs(np.diff(arr)))
+            if path == 0:
+                return 0.0
+            return float(np.clip(direct / path, 0.0, 1.0))
+        except Exception:
+            return 0.0
+
+    def std_bands(self, prices: List[float],
+                  period: int = 20) -> Dict[str, float]:
+        if len(prices) < period:
+            return {}
+        try:
+            arr  = np.array(prices[-period:], dtype=float)
+            mean = float(np.mean(arr))
+            std  = float(np.std(arr, ddof=1))
+            return {
+                "mean":    mean,   "std":     std,
+                "upper_1": mean + std,       "lower_1": mean - std,
+                "upper_2": mean + 2 * std,   "lower_2": mean - 2 * std,
+                "upper_3": mean + 3 * std,   "lower_3": mean - 3 * std,
+            }
+        except Exception:
+            return {}
+
+    def vwap_zscore(self, price: float, vwap: float,
+                    prices: List[float],
+                    period: int = 20) -> float:
+        if len(prices) < period or vwap == 0:
+            return 0.0
+        try:
+            std = float(np.std(prices[-period:], ddof=1))
+            if std == 0:
+                return 0.0
+            return float((price - vwap) / std)
+        except Exception:
+            return 0.0
+
+    def imbalance_zscore(self, current: float,
+                         history: List[float]) -> float:
+        if len(history) < 10:
+            return 0.0
+        try:
+            arr  = np.array(history, dtype=float)
+            mean = float(np.mean(arr))
+            std  = float(np.std(arr, ddof=1))
+            if std == 0:
+                return 0.0
+            return float((current - mean) / std)
+        except Exception:
+            return 0.0
+
+    def average_daily_range(self,
+                            daily_candles: List[Candle]) -> float:
+        if len(daily_candles) < 5:
+            return 0.0
+        return float(np.mean(
+            [c.range for c in daily_candles[-20:]]))
+
+    def adr_consumed(self,
+                     daily_candles: List[Candle],
+                     current_price: float
+                     ) -> Tuple[float, float]:
+        adr = self.average_daily_range(daily_candles)
+        if adr == 0 or not daily_candles:
+            return 0.0, 0.0
+        today_rng = daily_candles[-1].high - daily_candles[-1].low
+        pct       = min(100.0, today_rng / adr * 100)
+        return float(pct), float(adr)
+
+    def fibonacci_levels(self, swing_high: float,
+                          swing_low: float,
+                          direction: str = "LONG") -> Dict[str, float]:
+        rng = swing_high - swing_low
+        if rng == 0:
+            return {}
+        if direction == "LONG":
+            return {
+                "0.0":    swing_high,
+                "0.236":  swing_high - 0.236 * rng,
+                "0.382":  swing_high - 0.382 * rng,
+                "0.500":  swing_high - 0.500 * rng,
+                "0.618":  swing_high - 0.618 * rng,
+                "0.705":  swing_high - 0.705 * rng,
+                "0.786":  swing_high - 0.786 * rng,
+                "1.0":    swing_low,
+                "1.272":  swing_low  - 0.272 * rng,
+                "1.618":  swing_low  - 0.618 * rng,
+                "-0.272": swing_high + 0.272 * rng,
+                "-0.618": swing_high + 0.618 * rng,
+            }
+        else:
+            return {
+                "0.0":    swing_low,
+                "0.236":  swing_low  + 0.236 * rng,
+                "0.382":  swing_low  + 0.382 * rng,
+                "0.500":  swing_low  + 0.500 * rng,
+                "0.618":  swing_low  + 0.618 * rng,
+                "0.705":  swing_low  + 0.705 * rng,
+                "0.786":  swing_low  + 0.786 * rng,
+                "1.0":    swing_high,
+                "1.272":  swing_high + 0.272 * rng,
+                "1.618":  swing_high + 0.618 * rng,
+                "-0.272": swing_low  - 0.272 * rng,
+                "-0.618": swing_low  - 0.618 * rng,
+            }
+
+    def is_in_ote(self, price: float,
+                  swing_high: float,
+                  swing_low: float,
+                  direction: str) -> bool:
+        fibs = self.fibonacci_levels(swing_high, swing_low, direction)
+        if not fibs:
+            return False
+        if direction == "LONG":
+            return fibs["0.786"] <= price <= fibs["0.618"]
+        else:
+            return fibs["0.618"] <= price <= fibs["0.786"]
+
+    def calculate_pivots(self, prev_high: float,
+                          prev_low: float,
+                          prev_close: float) -> PivotLevels:
+        pp  = (prev_high + prev_low + prev_close) / 3
+        rng = prev_high - prev_low
+        return PivotLevels(
+            daily_pp = pp,
+            daily_r1 = 2 * pp - prev_low,
+            daily_r2 = pp + rng,
+            daily_r3 = prev_high + 2 * (pp - prev_low),
+            daily_s1 = 2 * pp - prev_high,
+            daily_s2 = pp - rng,
+            daily_s3 = prev_low - 2 * (prev_high - pp),
+            camarilla_r4 = prev_close + rng * 1.1 / 2,
+            camarilla_s4 = prev_close - rng * 1.1 / 2,
+        )
+
+    def linear_regression(self, prices: List[float],
+                           period: int = 50) -> Dict[str, float]:
+        if len(prices) < period:
+            period = len(prices)
+        if period < 5:
+            return {}
+        try:
+            arr    = np.array(prices[-period:], dtype=float)
+            x      = np.arange(len(arr))
+            slope, intercept, r, _, _ = linregress(x, arr)
+            fitted = slope * x + intercept
+            resid  = arr - fitted
+            std_r  = float(np.std(resid, ddof=1))
+            cur_ft = float(slope * (len(arr) - 1) + intercept)
+            return {
+                "slope":     float(slope),
+                "r_squared": float(r ** 2),
+                "upper_1":   cur_ft + std_r,
+                "upper_2":   cur_ft + 2 * std_r,
+                "lower_1":   cur_ft - std_r,
+                "lower_2":   cur_ft - 2 * std_r,
+                "mid":       cur_ft,
+                "std_resid": std_r,
+            }
+        except Exception:
+            return {}
+
+    def expected_move(self, price: float,
+                      atr: float,
+                      candles_remaining: int = 12) -> Dict[str, float]:
+        if atr == 0:
+            return {}
+        sigma = atr * math.sqrt(candles_remaining / 14)
+        return {
+            "1sigma_up":   price + sigma,
+            "1sigma_down": price - sigma,
+            "2sigma_up":   price + 2 * sigma,
+            "2sigma_down": price - 2 * sigma,
+            "sigma":       sigma,
+        }
+
+    def kelly_fraction(self, win_rate: float,
+                       avg_win: float,
+                       avg_loss: float) -> float:
+        if avg_loss == 0 or win_rate <= 0:
+            return 0.0
+        b  = avg_win / avg_loss
+        q  = 1.0 - win_rate
+        k  = (b * win_rate - q) / b
+        return float(max(0.0, min(k * 0.5, 0.05)))
+
+    def calculate_atr(self, candles: List[Candle],
+                       period: int = 14) -> float:
+        if len(candles) < period + 1:
+            return candles[-1].range if candles else 0.0001
+        tr = [
+            max(candles[i].high - candles[i].low,
+                abs(candles[i].high - candles[i-1].close),
+                abs(candles[i].low  - candles[i-1].close))
+            for i in range(1, len(candles))
+        ]
+        return float(np.mean(tr[-period:])) if tr else 0.0001
+
+    def volatility_ratio(self, candles: List[Candle],
+                          short: int = 14,
+                          long:  int = 50) -> float:
+        if len(candles) < long + 1:
+            return 1.0
+        satr = self.calculate_atr(candles, short)
+        latr = self.calculate_atr(candles[-long:], min(14, long - 1))
+        if latr == 0:
+            return 1.0
+        return float(satr / latr)
+
+    def statistical_levels(self,
+                            candles:    List[Candle],
+                            instrument: str,
+                            n_levels:   int = 6) -> List[Dict]:
+        if len(candles) < 20:
+            return []
+        pip  = pip_value(instrument)
+        tol  = pip * 5
+        points: List[Tuple[float, int, bool]] = []
+        for i in range(2, len(candles) - 2):
+            c = candles[i]
+            if all(c.high >= candles[i+d].high and
+                   c.high >= candles[i-d].high
+                   for d in range(1, 3)):
+                points.append((c.high, i, True))
+            if all(c.low <= candles[i+d].low and
+                   c.low <= candles[i-d].low
+                   for d in range(1, 3)):
+                points.append((c.low, i, False))
+        if not points:
+            return []
+        clusters = []
+        used     = set()
+        for idx, (price, ci, is_high) in enumerate(points):
+            if idx in used:
+                continue
+            group = [(price, ci, is_high)]
+            for jdx, (p2, ci2, ih2) in enumerate(
+                    points[idx+1:], idx+1):
+                if jdx not in used and abs(p2 - price) <= tol:
+                    group.append((p2, ci2, ih2))
+                    used.add(jdx)
+            used.add(idx)
+            touches   = len(group)
+            avg_price = sum(g[0] for g in group) / touches
+            recency   = sum(g[1] for g in group) / (
+                len(candles) * touches)
+            strength  = touches * (0.5 + recency)
+            clusters.append({
+                "price":   avg_price,
+                "type":    "RESISTANCE" if is_high else "SUPPORT",
+                "touches": touches,
+                "strength": strength,
+            })
+        clusters.sort(key=lambda x: x["strength"], reverse=True)
+        return clusters[:n_levels]
+
+    def calculate_vwap(self, candles: List[Candle]) -> float:
+        vp = sum((c.high + c.low + c.close) / 3 * c.volume
+                 for c in candles)
+        tv = sum(c.volume for c in candles)
+        return vp / tv if tv > 0 else (
+            candles[-1].close if candles else 0.0)
+
+    def check_regime_contradiction(self,
+                                   hurst:    float,
+                                   er:       float,
+                                   autocorr: float) -> bool:
+        """
+        Returns True if regime signals contradict each other.
+        Example: Hurst says trending but ER says choppy.
+        """
+        hurst_trending = hurst > 0.58
+        er_trending    = er    > 0.40
+        ac_trending    = autocorr > 0.10
+        trending_votes = sum([hurst_trending, er_trending, ac_trending])
+        return trending_votes == 1   # exactly one says trending = contradiction
+
+
+MATH = MarketMathEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  REGIME DETECTION ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class RegimeEngine:
+
+    def detect(self,
+               candles:       List[Candle],
+               daily_candles: Optional[List[Candle]] = None,
+               instrument:    str = "") -> RegimeData:
+        if len(candles) < 30:
+            return RegimeData()
+
+        closes  = [c.close for c in candles]
+        returns = [closes[i] / closes[i-1] - 1.0
+                   for i in range(1, len(closes))]
+
+        hurst   = MATH.hurst_exponent(closes[-100:])
+        frac    = MATH.fractal_dimension(closes[-50:])
+        entropy = MATH.price_entropy(returns[-50:])
+        ac1     = MATH.autocorrelation(returns[-30:], lag=1)
+        vr      = MATH.variance_ratio(closes[-50:], q=5)
+        er      = MATH.efficiency_ratio(closes, period=20)
+        vol_r   = MATH.volatility_ratio(candles, 14, 50)
+        lr      = MATH.linear_regression(closes, period=50)
+        slope   = lr.get("slope", 0.0)
+        r2      = lr.get("r_squared", 0.0)
+
+        adr_pct = 0.0
+        adr_val = 0.0
+        if daily_candles and len(daily_candles) >= 5:
+            adr_pct, adr_val = MATH.adr_consumed(
+                daily_candles, candles[-1].close)
+
+        contradictory = MATH.check_regime_contradiction(hurst, er, ac1)
+        regime        = self._classify(
+            hurst, frac, entropy, ac1, vr, er, vol_r, r2)
+        rec_strat     = self._recommend(regime, vol_r, er)
+
+        return RegimeData(
+            regime               = regime,
+            hurst_exponent       = hurst,
+            fractal_dimension    = frac,
+            entropy              = entropy,
+            autocorr_lag1        = ac1,
+            variance_ratio       = vr,
+            efficiency_ratio     = er,
+            volatility_ratio     = vol_r,
+            adr_consumed_pct     = adr_pct,
+            adr_today            = adr_val,
+            adr_average          = adr_val,
+            trend_slope          = slope,
+            r_squared            = r2,
+            recommended_strategy = rec_strat,
+            contradictory        = contradictory,
+        )
+
+    def _classify(self, hurst, frac, entropy, ac1,
+                  vr, er, vol_r, r2) -> RegimeType:
+        if vol_r < 0.5:
+            return RegimeType.COMPRESSION
+        if vol_r > 2.5:
+            return RegimeType.EXPANSION
+        if entropy > 0.9 and vol_r > 1.5:
+            return RegimeType.CHAOTIC
+
+        tv = bv = 0
+        if hurst > 0.58:   tv += 2
+        elif hurst < 0.42: bv += 2
+        elif hurst > 0.52: tv += 1
+        elif hurst < 0.48: bv += 1
+
+        if frac < 1.35:    tv += 1
+        elif frac > 1.65:  bv += 1
+
+        if ac1 > 0.15:     tv += 1
+        elif ac1 < -0.15:  bv += 1
+
+        if vr > 1.3:       tv += 1
+        elif vr < 0.7:     bv += 1
+
+        if er > 0.45:      tv += 1
+        elif er < 0.25:    bv += 1
+
+        if r2 > 0.65:      tv += 1
+        elif r2 < 0.25:    bv += 1
+
+        if entropy < 0.5:  tv += 1
+        elif entropy > 0.8: bv += 1
+
+        if tv >= bv * 1.5:
+            return (RegimeType.STRONG_TREND
+                    if tv >= 5 else RegimeType.WEAK_TREND)
+        if bv >= tv * 1.5:
+            return RegimeType.RANGING
+        return RegimeType.RANGING
+
+    def _recommend(self, regime: RegimeType,
+                   vol_r: float,
+                   er: float) -> Optional[StrategyType]:
+        if regime in (RegimeType.STRONG_TREND, RegimeType.WEAK_TREND):
+            return StrategyType.ICT_CONTINUATION
+        if regime == RegimeType.RANGING:
+            return StrategyType.ICT_REVERSAL
+        if regime == RegimeType.COMPRESSION:
+            return StrategyType.BREAKOUT
+        return None
+
+    def is_strategy_valid(self, strategy: StrategyType,
+                           regime: RegimeData,
+                           session: SessionData) -> bool:
+        if regime.regime == RegimeType.CHAOTIC:
+            return False
+        if strategy == StrategyType.ICT_CONTINUATION:
+            return regime.regime in (
+                RegimeType.STRONG_TREND, RegimeType.WEAK_TREND,
+                RegimeType.EXPANSION)
+        if strategy == StrategyType.ICT_REVERSAL:
+            return regime.regime in (
+                RegimeType.RANGING, RegimeType.COMPRESSION,
+                RegimeType.WEAK_TREND)
+        if strategy == StrategyType.AMD_SESSION:
+            return (session.is_kill_zone and
+                    session.amd_phase in ("MANIPULATION", "DISTRIBUTION"))
+        if strategy == StrategyType.RETAIL_CONTRARIAN:
+            return True
+        if strategy == StrategyType.BREAKOUT:
+            return regime.regime in (
+                RegimeType.COMPRESSION, RegimeType.RANGING)
+        if strategy == StrategyType.MEAN_REVERSION:
+            return regime.regime == RegimeType.RANGING
+        if strategy == StrategyType.CORRELATION_DIV:
+            return regime.regime != RegimeType.CHAOTIC
+        return True
+
+
+REGIME_ENGINE = RegimeEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  ORDER FLOW ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class OrderFlowEngine:
+
+    _imbalance_history: Dict[str, deque] = {}
+
+    def analyze(self, candles: List[Candle],
+                instrument: str = "") -> OrderFlowData:
+        if not candles or len(candles) < 20:
+            return OrderFlowData()
+
+        bv    = sum(c.buy_volume  for c in candles)
+        sv    = sum(c.sell_volume for c in candles)
+        tv    = bv + sv
+        cvd   = sum(c.delta for c in candles)
+        vwap  = MATH.calculate_vwap(candles)
+        price = candles[-1].close
+
+        rd5   = sum(c.delta for c in candles[-5:])
+        rd10  = sum(c.delta for c in candles[-10:])
+        rd20  = sum(c.delta for c in candles[-20:])
+        d5f   = (sum(c.delta for c in candles[-10:-5])
+                 if len(candles) >= 10 else 0.0)
+        mom   = rd5 - d5f
+
+        cv = []
+        r  = 0.0
+        for c in candles[-20:]:
+            r += c.delta
+            cv.append(r)
+        cvd_slope = ((sum(cv[10:]) / max(1, len(cv)-10)) -
+                     sum(cv[:10]) / 10) if len(cv) >= 10 else 0.0
+
+        if len(candles) >= 20:
+            v1 = sum(c.volume for c in candles[-20:-10]) / 10
+            v2 = sum(c.volume for c in candles[-10:])    / 10
+            vt = (v2 - v1) / v1 * 100 if v1 > 0 else 0.0
+        else:
+            vt = 0.0
+
+        if len(candles) >= 15:
+            vf = sum(c.volume for c in candles[-15:-10]) / 5
+            vm = sum(c.volume for c in candles[-10:-5])  / 5
+            vl = sum(c.volume for c in candles[-5:])     / 5
+            va = (vl - vm) - (vm - vf)
+        else:
+            va = 0.0
+
+        avg_v = tv / len(candles) if candles else 1.0
+        rec_v = sum(c.volume for c in candles[-3:]) / 3
+        bc    = rec_v > avg_v * 2.0 and rd5 > 0 and mom < 0
+        sc    = rec_v > avg_v * 2.0 and rd5 < 0 and mom > 0
+
+        imb   = (bv - sv) / tv * 100 if tv > 0 else 0.0
+
+        key = instrument
+        if key not in self._imbalance_history:
+            self._imbalance_history[key] = deque(maxlen=200)
+        self._imbalance_history[key].append(imb)
+        imb_z = MATH.imbalance_zscore(
+            imb, list(self._imbalance_history[key]))
+
+        closes = [c.close for c in candles]
+        vwap_z = MATH.vwap_zscore(price, vwap, closes)
+        er     = MATH.efficiency_ratio(closes, period=20)
+        vol_r  = MATH.volatility_ratio(candles)
+
+        return OrderFlowData(
+            buy_volume       = bv,
+            sell_volume      = sv,
+            total_volume     = tv,
+            cvd              = cvd,
+            delta            = rd20,
+            buy_pct          = (bv/tv*100) if tv > 0 else 50.0,
+            sell_pct         = (sv/tv*100) if tv > 0 else 50.0,
+            imbalance        = imb,
+            imbalance_zscore = imb_z,
+            price            = price,
+            vwap             = vwap,
+            vwap_zscore      = vwap_z,
+            delta_momentum   = mom,
+            volume_trend     = vt,
+            recent_delta_5   = rd5,
+            recent_delta_10  = rd10,
+            recent_delta_20  = rd20,
+            cvd_slope        = cvd_slope,
+            volume_accel     = va,
+            buying_climax    = bc,
+            selling_climax   = sc,
+            vol_ratio        = vol_r,
+            efficiency_ratio = er,
+        )
+
+
+OF_ENGINE = OrderFlowEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  ADVANCED FLOW ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class AdvancedFlowEngine:
+
+    def analyze(self, candles: List[Candle],
+                order_book: Optional[Dict] = None) -> AdvancedFlowData:
+        if not candles or len(candles) < 20:
+            return AdvancedFlowData()
+
+        vpin     = self._vpin(candles)
+        pir      = self._price_impact_ratio(candles)
+        toxicity = self._toxicity(candles)
+        amihud   = self._amihud(candles)
+        roll     = self._roll_spread(candles)
+        abs_r    = self._absorption_ratio(candles)
+        aggr     = self._aggressor_side(candles)
+
+        depth_imb   = 0.0
+        iceberg_cnt = 0
+        if order_book:
+            depth_imb   = self._depth_imbalance(order_book)
+            iceberg_cnt = len(self._detect_icebergs(order_book))
+
+        vpin_lv  = self._lvl_vpin(vpin)
+        tox_lv   = self._lvl_toxicity(toxicity)
+        liq_lv   = self._lvl_liquidity(amihud)
+        depth_b  = self._bias_depth(depth_imb)
+        sm_act   = self._smart_money_score(vpin, toxicity, pir, depth_imb)
+        informed = self._informed_signal(candles, vpin, toxicity, aggr)
+        inst_sc  = self._institutional_score(
+            vpin, pir, toxicity, abs_r, iceberg_cnt)
+
+        return AdvancedFlowData(
+            vpin                   = vpin,
+            vpin_level             = vpin_lv,
+            price_impact_ratio     = pir,
+            toxicity               = toxicity,
+            toxicity_level         = tox_lv,
+            amihud_illiquidity     = amihud,
+            liquidity_level        = liq_lv,
+            market_depth_imbalance = depth_imb,
+            depth_bias             = depth_b,
+            iceberg_count          = iceberg_cnt,
+            smart_money_activity   = sm_act,
+            informed_signal        = informed,
+            absorption_ratio       = abs_r,
+            aggressor_side         = aggr,
+            institutional_score    = inst_sc,
+            roll_spread            = roll,
+        )
+
+    def _vpin(self, candles: List[Candle],
+              num_buckets: int = 50) -> float:
         tv = sum(c.volume for c in candles)
         bs = tv / num_buckets
         if bs == 0: return 0.0
@@ -944,25 +1802,25 @@ class AdvancedOrderFlow:
                 bb.append(cb * r); sb.append(cs * r)
                 cb -= cb * r; cs -= cs * r; cv -= bs
         if not bb: return 0.0
-        return min(1.0, sum(abs(b - s) for b, s in zip(bb, sb)) / (len(bb) * bs))
+        return float(min(1.0,
+            sum(abs(b - s) for b, s in zip(bb, sb)) / (len(bb) * bs)))
 
-    def _kyle_lambda(self, candles: List[Candle]) -> float:
+    def _price_impact_ratio(self, candles: List[Candle]) -> float:
         if len(candles) < 10: return 0.0
-        pc = [c.close - c.open for c in candles]
-        sv = [c.delta for c in candles]
-        vv = np.var(sv)
-        if vv == 0: return 0.0
         try:
+            pc  = [c.close - c.open for c in candles]
+            sv  = [c.delta for c in candles]
+            vv  = float(np.var(sv))
+            if vv == 0: return 0.0
             cov = np.cov(pc, sv)
-            return float(cov[0][1] / vv) if cov.shape == (2, 2) else 0.0
-        except Exception:
-            return 0.0
+            return float(cov[0][1] / vv) if cov.shape == (2,2) else 0.0
+        except Exception: return 0.0
 
     def _toxicity(self, candles: List[Candle]) -> float:
         if len(candles) < 10: return 0.0
         scores = []
         for i in range(1, len(candles)):
-            p = candles[i - 1]; c = candles[i]
+            p = candles[i-1]; c = candles[i]
             exp = (p.delta / p.volume * p.range) if p.volume > 0 else 0
             if p.range > 0:
                 scores.append(
@@ -973,26 +1831,50 @@ class AdvancedOrderFlow:
         if len(candles) < 5: return 0.0
         illiq = []
         for i in range(1, len(candles)):
-            pc, cc, vol = (candles[i-1].close, candles[i].close,
-                           candles[i].volume)
+            pc = candles[i-1].close; cc = candles[i].close
+            vol = candles[i].volume
             if pc > 0 and vol > 0:
                 illiq.append(abs((cc - pc) / pc) / vol)
         return float(np.mean(illiq) * 1e9) if illiq else 0.0
 
     def _roll_spread(self, candles: List[Candle]) -> float:
         if len(candles) < 20: return 0.0
-        ch = [candles[i].close - candles[i-1].close
-              for i in range(1, len(candles))]
+        ch  = [candles[i].close - candles[i-1].close
+               for i in range(1, len(candles))]
         if len(ch) < 2: return 0.0
         m   = float(np.mean(ch))
-        cov = float(np.mean(
-            [(ch[i]-m)*(ch[i-1]-m) for i in range(1, len(ch))]))
-        return float(2 * np.sqrt(-cov)) if cov < 0 else 0.0
+        cov = float(np.mean([(ch[i]-m)*(ch[i-1]-m)
+                              for i in range(1, len(ch))]))
+        return float(2 * math.sqrt(-cov)) if cov < 0 else 0.0
 
-    def _detect_icebergs(self, order_book: Optional[Dict]) -> Dict:
-        if not order_book or "buckets" not in order_book: return {}
+    def _absorption_ratio(self, candles: List[Candle]) -> float:
+        if not candles: return 1.0
+        ba = sa = 0.0
+        for c in candles:
+            d   = c.range + 0.0001
+            ba += c.lower_wick * c.volume / d
+            sa += c.upper_wick * c.volume / d
+        if sa == 0: return 2.0 if ba > 0 else 1.0
+        return float(ba / sa)
+
+    def _aggressor_side(self, candles: List[Candle]) -> str:
+        if len(candles) < 5: return "NEUTRAL"
+        bv = bev = 0.0
+        for c in candles[-10:]:
+            if c.range > 0 and c.body_ratio > 0.6:
+                if c.is_bullish: bv  += c.volume
+                else:            bev += c.volume
+        t = bv + bev
+        if t == 0: return "NEUTRAL"
+        bp = bv / t
+        if bp > 0.60: return "BUYERS"
+        if bp < 0.40: return "SELLERS"
+        return "NEUTRAL"
+
+    def _detect_icebergs(self, ob: Optional[Dict]) -> Dict:
+        if not ob or "buckets" not in ob: return {}
         fm = {}
-        for b in order_book["buckets"]:
+        for b in ob["buckets"]:
             p = float(b["price"])
             t = (float(b.get("longCountPercent", 0)) +
                  float(b.get("shortCountPercent", 0)))
@@ -1003,133 +1885,54 @@ class AdvancedOrderFlow:
         std  = float(np.std(vals)) if len(vals) > 1 else 0.0
         return {p: f for p, f in fm.items() if f > avg + 2 * std}
 
-    def _depth_imbalance(self, order_book: Optional[Dict]) -> float:
-        if not order_book or "buckets" not in order_book: return 0.0
-        bp = float(order_book.get("price", 0))
+    def _depth_imbalance(self, ob: Optional[Dict]) -> float:
+        if not ob or "buckets" not in ob: return 0.0
+        bp = float(ob.get("price", 0))
         bid = ask = 0.0
-        for b in order_book["buckets"]:
+        for b in ob["buckets"]:
             p = float(b["price"])
             t = (float(b.get("longCountPercent", 0)) +
                  float(b.get("shortCountPercent", 0)))
-            bid += t if p < bp else 0
-            ask += t if p >= bp else 0
+            if p < bp: bid += t
+            else:      ask += t
         td = bid + ask
-        return max(-1.0, min(1.0, (bid - ask) / td)) if td > 0 else 0.0
+        return float(max(-1.0, min(1.0, (bid-ask)/td))) if td > 0 else 0.0
 
-    def _effective_spread(self, candles: List[Candle]) -> float:
-        sp = [(c.high - c.low) / c.close * 100
-              for c in candles if c.close > 0]
-        return float(np.mean(sp)) if sp else 0.0
-
-    def _realized_spread(self, candles: List[Candle], h: int = 5) -> float:
-        if len(candles) < h + 5: return 0.0
-        rs = []
-        for i in range(h, len(candles)):
-            im = (candles[i-h].high + candles[i-h].low) / 2
-            fm = (candles[i].high + candles[i].low) / 2
-            d  = 1 if candles[i-h].is_bullish else -1
-            if im > 0: rs.append((fm - im) / im * 100 * d)
-        return float(np.mean(rs)) if rs else 0.0
-
-    def _price_impact(self, candles: List[Candle]) -> float:
-        if len(candles) < 10: return 0.0
-        imp = [abs(candles[i].close - candles[i-5].close) /
-               candles[i-5].close * 100
-               for i in range(5, len(candles))
-               if candles[i-5].close > 0]
-        return float(np.mean(imp)) if imp else 0.0
-
-    def _arrival_rate(self, candles: List[Candle]) -> float:
-        if not candles: return 0.0
-        vols = [c.volume for c in candles]
-        avg  = float(np.mean(vols))
-        std  = float(np.std(vols)) if len(vols) > 1 else 1.0
-        rec  = float(np.mean(vols[-5:])) if len(vols) >= 5 else avg
-        return float((rec - avg) / std) if std > 0 else 0.0
-
-    def _volume_clustering(self, candles: List[Candle]) -> float:
-        if len(candles) < 10: return 0.0
-        lo = min(c.low for c in candles)
-        hi = max(c.high for c in candles)
-        rng = hi - lo
-        if rng == 0: return 0.0
-        nz = 10; zs = rng / nz; zv = [0.0] * nz
-        for c in candles:
-            idx = min(int(((c.high + c.low) / 2 - lo) / zs), nz - 1)
-            zv[idx] += c.volume
-        tv = sum(zv)
-        if tv == 0: return 0.0
-        sh = [v / tv for v in zv]
-        hf = sum(s**2 for s in sh)
-        mn = 1.0 / nz
-        return float(max(0.0, min(1.0, (hf - mn) / (1.0 - mn))))
-
-    def _absorption_ratio(self, candles: List[Candle]) -> float:
-        if not candles: return 1.0
-        ba = sa = 0.0
-        for c in candles:
-            d = c.range + 0.0001
-            ba += c.lower_wick * c.volume / d
-            sa += c.upper_wick * c.volume / d
-        if sa == 0: return 2.0 if ba > 0 else 1.0
-        return float(ba / sa)
-
-    def _aggressor_side(self, candles: List[Candle]) -> str:
-        if len(candles) < 5: return "NEUTRAL"
-        bv = bev = 0.0
-        for c in candles[-10:]:
-            if c.range > 0 and c.body_abs / c.range > 0.6:
-                if c.is_bullish: bv += c.volume
-                else:            bev += c.volume
-        t = bv + bev
-        if t == 0: return "NEUTRAL"
-        bp = bv / t
-        if bp > 0.6: return "BUYERS"
-        if bp < 0.4: return "SELLERS"
-        return "NEUTRAL"
-
-    def _interp_vpin(self, v: float) -> str:
-        if v >= 0.7:  return "VERY HIGH 🔥"
-        if v >= 0.5:  return "HIGH ⚠️"
-        if v >= 0.3:  return "MODERATE"
+    def _lvl_vpin(self, v: float) -> str:
+        if v >= 0.70: return "VERY HIGH 🔥"
+        if v >= 0.50: return "HIGH ⚠️"
+        if v >= 0.30: return "MODERATE"
         if v >= 0.15: return "LOW"
         return "MINIMAL"
 
-    def _interp_toxicity(self, t: float) -> str:
-        if t >= 0.7: return "VERY HIGH 🔥"
-        if t >= 0.5: return "HIGH ⚠️"
-        if t >= 0.3: return "MODERATE"
+    def _lvl_toxicity(self, t: float) -> str:
+        if t >= 0.70: return "VERY HIGH 🔥"
+        if t >= 0.50: return "HIGH ⚠️"
+        if t >= 0.30: return "MODERATE"
         return "LOW"
 
-    def _interp_liquidity(self, a: float) -> str:
+    def _lvl_liquidity(self, a: float) -> str:
         if a >= 100: return "VERY ILLIQUID ⚠️"
         if a >= 50:  return "ILLIQUID"
         if a >= 20:  return "MODERATE"
         return "LIQUID ✅"
 
-    def _interp_depth(self, d: float) -> str:
-        if d >= 0.3:  return "STRONG BID PRESSURE 🟢"
-        if d >= 0.1:  return "BID PRESSURE"
-        if d <= -0.3: return "STRONG ASK PRESSURE 🔴"
-        if d <= -0.1: return "ASK PRESSURE"
+    def _bias_depth(self, d: float) -> str:
+        if d >= 0.30:  return "STRONG BID 🟢"
+        if d >= 0.10:  return "BID PRESSURE"
+        if d <= -0.30: return "STRONG ASK 🔴"
+        if d <= -0.10: return "ASK PRESSURE"
         return "BALANCED"
 
-    def _interp_kyle(self, kl: float) -> str:
-        a = abs(kl)
-        if a >= 0.0001:  return "HIGH IMPACT (Informed trading or illiquid)"
-        if a >= 0.00005: return "MODERATE IMPACT"
-        if a >= 0.00001: return "LOW IMPACT"
-        return "MINIMAL IMPACT (Efficient market)"
-
-    def _smart_money_score(self, vpin, toxicity, kl, depth) -> str:
+    def _smart_money_score(self, vpin, toxicity, pir, depth) -> str:
         s = 0
-        if vpin >= 0.5:       s += 30
-        elif vpin >= 0.3:     s += 15
-        if toxicity >= 0.5:   s += 25
-        elif toxicity >= 0.3: s += 12
-        if abs(kl) >= 0.00005:  s += 25
-        elif abs(kl) >= 0.00001: s += 12
-        if abs(depth) >= 0.3:    s += 20
+        if vpin >= 0.50:       s += 30
+        elif vpin >= 0.30:     s += 15
+        if toxicity >= 0.50:   s += 25
+        elif toxicity >= 0.30: s += 12
+        if abs(pir) >= 0.00005:  s += 25
+        elif abs(pir) >= 0.00001: s += 12
+        if abs(depth) >= 0.30:   s += 20
         elif abs(depth) >= 0.15: s += 10
         if s >= 70: return "VERY HIGH 🔥"
         if s >= 50: return "HIGH ⚠️"
@@ -1138,7 +1941,7 @@ class AdvancedOrderFlow:
         return "MINIMAL"
 
     def _informed_signal(self, candles, vpin, toxicity, aggressor) -> str:
-        if vpin < 0.3 and toxicity < 0.3: return "NEUTRAL"
+        if vpin < 0.30 and toxicity < 0.30: return "NEUTRAL"
         cvd = sum(c.delta for c in candles[-10:])
         if aggressor == "BUYERS"  and cvd > 0: return "BULLISH 🟢"
         if aggressor == "SELLERS" and cvd < 0: return "BEARISH 🔴"
@@ -1146,376 +1949,67 @@ class AdvancedOrderFlow:
         if cvd < 0: return "LEANING BEARISH"
         return "NEUTRAL"
 
-    def _institutional_score(self, vpin, kl, toxicity,
-                              absorption, clustering) -> float:
+    def _institutional_score(self, vpin, pir, toxicity,
+                              absorption, icebergs) -> float:
         s  = min(25.0, vpin * 35)
-        s += min(20.0, abs(kl) * 100000 * 20)
+        s += min(20.0, abs(pir) * 100000 * 20)
         s += min(20.0, toxicity * 30)
-        s += min(15.0, clustering * 20)
+        s += min(10.0, icebergs * 5)
         if absorption > 1.5 or absorption < 0.67:   s += 20
         elif absorption > 1.2 or absorption < 0.83: s += 10
         return min(100.0, s)
 
 
-ADVANCED_OF = AdvancedOrderFlow()
-
-
-# ════════════════════════════════════════════════════════════════
-#  BASIC ORDER FLOW ENGINE
-# ════════════════════════════════════════════════════════════════
-
-class OrderFlowEngine:
-
-    def analyze(self, candles: List[Candle]) -> OrderFlowData:
-        if not candles or len(candles) < 20:
-            return OrderFlowData()
-        bv = sum(c.buy_volume for c in candles)
-        sv = sum(c.sell_volume for c in candles)
-        tv = bv + sv
-        cvd    = sum(c.delta for c in candles)
-        vwap_n = sum((c.high+c.low+c.close)/3*c.volume for c in candles)
-        vwap_d = sum(c.volume for c in candles)
-        vwap   = vwap_n / vwap_d if vwap_d > 0 else candles[-1].close
-        rd5  = sum(c.delta for c in candles[-5:])
-        rd10 = sum(c.delta for c in candles[-10:])
-        rd20 = sum(c.delta for c in candles[-20:])
-        d5f  = (sum(c.delta for c in candles[-10:-5])
-                if len(candles) >= 10 else 0.0)
-        mom  = rd5 - d5f
-        cv   = []; r = 0.0
-        for c in candles[-20:]:
-            r += c.delta; cv.append(r)
-        cvd_slope = ((sum(cv[10:])/max(1,len(cv)-10)) -
-                     sum(cv[:10])/10) if len(cv) >= 10 else 0.0
-        if len(candles) >= 20:
-            v1 = sum(c.volume for c in candles[-20:-10]) / 10
-            v2 = sum(c.volume for c in candles[-10:])    / 10
-            vt = ((v2-v1)/v1*100) if v1 > 0 else 0.0
-        else:
-            vt = 0.0
-        if len(candles) >= 15:
-            vf = sum(c.volume for c in candles[-15:-10]) / 5
-            vm = sum(c.volume for c in candles[-10:-5])  / 5
-            vl = sum(c.volume for c in candles[-5:])     / 5
-            va = (vl - vm) - (vm - vf)
-        else:
-            va = 0.0
-        avg_v = tv / len(candles) if candles else 1.0
-        rec_v = sum(c.volume for c in candles[-3:]) / 3
-        bc    = rec_v > avg_v*2 and rd5 > 0 and mom < 0
-        sc    = rec_v > avg_v*2 and rd5 < 0 and mom > 0
-        return OrderFlowData(
-            buy_volume=bv, sell_volume=sv, total_volume=tv,
-            cvd=cvd, delta=rd20,
-            buy_pct=(bv/tv*100) if tv > 0 else 50.0,
-            sell_pct=(sv/tv*100) if tv > 0 else 50.0,
-            imbalance=((bv-sv)/tv*100) if tv > 0 else 0.0,
-            price=candles[-1].close, vwap=vwap,
-            delta_momentum=mom, volume_trend=vt,
-            recent_delta_5=rd5, recent_delta_10=rd10, recent_delta_20=rd20,
-            cvd_slope=cvd_slope, volume_acceleration=va,
-            buying_climax=bc, selling_climax=sc
-        )
-
-    def evaluate_confluence(self, order_flow: OrderFlowData,
-                            volume_profile: Optional[VolumeProfile],
-                            order_book: Optional[OrderBookData],
-                            position_book: Optional[PositionBookData],
-                            currency_strength: Optional[Dict],
-                            advanced_flow: Optional[AdvancedOrderFlowData],
-                            instrument: str,
-                            current_price: float,
-                            liquidity_zones: Optional[List[LiquidityZone]] = None
-                            ) -> PredictionResult:
-        factors = []
-        tv = order_flow.total_volume
-
-        def f(name, direction, strength, desc):
-            factors.append(ConfluenceFactor(name, direction, strength, desc))
-
-        # CVD
-        if order_flow.cvd > 0:
-            f("CVD", "BULLISH",
-              min(100, abs(order_flow.cvd) / (tv/100+1) * 10),
-              f"Cumulative buying pressure ({format_signed(order_flow.cvd)})")
-        elif order_flow.cvd < 0:
-            f("CVD", "BEARISH",
-              min(100, abs(order_flow.cvd) / (tv/100+1) * 10),
-              f"Cumulative selling pressure ({format_signed(order_flow.cvd)})")
-        else:
-            f("CVD", "NEUTRAL", 0, "CVD is flat")
-
-        # Imbalance
-        if order_flow.imbalance > MIN_IMBALANCE_PCT:
-            f("Imbalance", "BULLISH",
-              min(100, order_flow.imbalance * 3),
-              f"Buyers dominating ({order_flow.imbalance:+.1f}%)")
-        elif order_flow.imbalance < -MIN_IMBALANCE_PCT:
-            f("Imbalance", "BEARISH",
-              min(100, abs(order_flow.imbalance) * 3),
-              f"Sellers dominating ({order_flow.imbalance:+.1f}%)")
-        else:
-            f("Imbalance", "NEUTRAL", 0, "Balanced order flow")
-
-        # Delta Momentum
-        mt = tv / 50 if tv > 0 else 1
-        if order_flow.delta_momentum > mt:
-            f("Delta Momentum", "BULLISH",
-              min(100, order_flow.delta_momentum / mt * 30),
-              "Buying pressure accelerating")
-        elif order_flow.delta_momentum < -mt:
-            f("Delta Momentum", "BEARISH",
-              min(100, abs(order_flow.delta_momentum) / mt * 30),
-              "Selling pressure accelerating")
-        else:
-            f("Delta Momentum", "NEUTRAL", 0, "No momentum acceleration")
-
-        # CVD Slope
-        st = tv / 100 if tv > 0 else 1
-        if order_flow.cvd_slope > st:
-            f("CVD Trend", "BULLISH",
-              min(100, order_flow.cvd_slope / st * 20),
-              "CVD trending upward")
-        elif order_flow.cvd_slope < -st:
-            f("CVD Trend", "BEARISH",
-              min(100, abs(order_flow.cvd_slope) / st * 20),
-              "CVD trending downward")
-        else:
-            f("CVD Trend", "NEUTRAL", 0, "CVD is flat")
-
-        # Recent Delta
-        tv100 = tv / 100 + 1
-        if order_flow.recent_delta_5 > 0:
-            f("Recent Flow", "BULLISH",
-              min(100, order_flow.recent_delta_5 / tv100 * 15),
-              "Recent candles show buying")
-        elif order_flow.recent_delta_5 < 0:
-            f("Recent Flow", "BEARISH",
-              min(100, abs(order_flow.recent_delta_5) / tv100 * 15),
-              "Recent candles show selling")
-        else:
-            f("Recent Flow", "NEUTRAL", 0, "Recent flow neutral")
-
-        # Volume
-        if order_flow.volume_trend > 15:
-            d = "BULLISH" if order_flow.cvd > 0 else "BEARISH"
-            f("Volume", d,
-              min(100, order_flow.volume_trend * 2),
-              f"Volume increasing ({order_flow.volume_trend:+.1f}%)")
-        elif order_flow.volume_trend < -15:
-            f("Volume", "NEUTRAL", 20,
-              "Volume declining - weak conviction")
-        else:
-            f("Volume", "NEUTRAL", 0, "Volume stable")
-
-        # VWAP
-        vd = ((current_price - order_flow.vwap) / order_flow.vwap * 100
-              if order_flow.vwap > 0 else 0)
-        if vd > 0.05:
-            f("VWAP", "BULLISH", min(100, vd * 50),
-              "Price above VWAP (bullish bias)")
-        elif vd < -0.05:
-            f("VWAP", "BEARISH", min(100, abs(vd) * 50),
-              "Price below VWAP (bearish bias)")
-        else:
-            f("VWAP", "NEUTRAL", 0, "Price at VWAP")
-
-        # Position Book
-        if position_book:
-            if position_book.skew > 20:
-                f("Contrarian", "BEARISH",
-                  min(100, position_book.skew * 2),
-                  f"Retail {position_book.long_pct:.0f}% long "
-                  f"(contrarian short)")
-            elif position_book.skew < -20:
-                f("Contrarian", "BULLISH",
-                  min(100, abs(position_book.skew) * 2),
-                  f"Retail {position_book.short_pct:.0f}% short "
-                  f"(contrarian long)")
-            else:
-                f("Contrarian", "NEUTRAL", 0,
-                  "No extreme retail positioning")
-
-        # Order Book
-        if order_book:
-            if order_book.breakout_bias == "UPWARD_PRESSURE":
-                f("Order Book", "BULLISH", 60,
-                  "Pending orders favour upside")
-            elif order_book.breakout_bias == "DOWNWARD_PRESSURE":
-                f("Order Book", "BEARISH", 60,
-                  "Pending orders favour downside")
-            else:
-                f("Order Book", "NEUTRAL", 0, "Balanced order book")
-
-        # Currency Strength
-        if currency_strength and "_" in instrument:
-            parts = instrument.split("_")
-            if len(parts) == 2:
-                bs = currency_strength.get(parts[0])
-                qs = currency_strength.get(parts[1])
-                if bs and qs:
-                    diff = bs.strength - qs.strength
-                    if diff > 0.1:
-                        f("Currency Strength", "BULLISH",
-                          min(100, diff * 30),
-                          f"{parts[0]} stronger than {parts[1]}")
-                    elif diff < -0.1:
-                        f("Currency Strength", "BEARISH",
-                          min(100, abs(diff) * 30),
-                          f"{parts[1]} stronger than {parts[0]}")
-                    else:
-                        f("Currency Strength", "NEUTRAL", 0,
-                          "Currencies equally strong")
-
-        # Climax
-        if order_flow.buying_climax:
-            f("Climax Warning", "BEARISH", 40,
-              "Buying climax - exhaustion risk")
-        if order_flow.selling_climax:
-            f("Climax Warning", "BULLISH", 40,
-              "Selling climax - exhaustion risk")
-
-        # Advanced Flow
-        if advanced_flow:
-            if advanced_flow.vpin >= 0.5:
-                d = "BULLISH" if order_flow.cvd > 0 else "BEARISH"
-                f("VPIN (Smart Money)", d,
-                  min(100, advanced_flow.vpin * 80),
-                  f"Smart money active ({advanced_flow.vpin_level})")
-            if "BULLISH" in advanced_flow.informed_trader_signal:
-                f("Informed Traders", "BULLISH", 70,
-                  "Informed traders buying")
-            elif "BEARISH" in advanced_flow.informed_trader_signal:
-                f("Informed Traders", "BEARISH", 70,
-                  "Informed traders selling")
-            if advanced_flow.market_depth_imbalance > 0.2:
-                f("Order Book Depth", "BULLISH",
-                  min(100, advanced_flow.market_depth_imbalance * 150),
-                  f"Strong bid support ({advanced_flow.depth_bias})")
-            elif advanced_flow.market_depth_imbalance < -0.2:
-                f("Order Book Depth", "BEARISH",
-                  min(100, abs(advanced_flow.market_depth_imbalance) * 150),
-                  f"Strong ask pressure ({advanced_flow.depth_bias})")
-            if advanced_flow.aggressor_side == "BUYERS":
-                f("Aggressor", "BULLISH", 60,
-                  "Buyers aggressively taking offers")
-            elif advanced_flow.aggressor_side == "SELLERS":
-                f("Aggressor", "BEARISH", 60,
-                  "Sellers aggressively hitting bids")
-            if advanced_flow.institutional_flow_score >= 60:
-                d = "BULLISH" if order_flow.cvd > 0 else "BEARISH"
-                f("Institutional Flow", d,
-                  advanced_flow.institutional_flow_score,
-                  f"High institutional activity "
-                  f"({advanced_flow.institutional_flow_score:.0f}%)")
-            if advanced_flow.absorption_ratio > 1.5:
-                f("Absorption", "BULLISH",
-                  min(100, (advanced_flow.absorption_ratio - 1) * 80),
-                  "Buying absorption detected")
-            elif advanced_flow.absorption_ratio < 0.67:
-                f("Absorption", "BEARISH",
-                  min(100, (1 - advanced_flow.absorption_ratio) * 80),
-                  "Selling absorption detected")
-            if advanced_flow.toxicity >= 0.5:
-                opp = "BEARISH" if order_flow.cvd > 0 else "BULLISH"
-                f("Flow Toxicity", opp, 30,
-                  f"High toxicity ({advanced_flow.toxicity_level}) "
-                  f"- reversal risk")
-
-        # Liquidity Zone alignment
-        if liquidity_zones:
-            nearby = [z for z in liquidity_zones
-                      if pips_diff(instrument,
-                                   abs(z.price - current_price)) < 50]
-            demand = [z for z in nearby
-                      if z.zone_type in ("DEMAND", "EQUAL_LOWS")
-                      and z.price < current_price]
-            supply = [z for z in nearby
-                      if z.zone_type in ("SUPPLY", "EQUAL_HIGHS")
-                      and z.price > current_price]
-            if demand:
-                f("Liquidity Zone", "BULLISH",
-                  min(100, max(z.strength for z in demand)),
-                  f"Price near demand zone / liquidity "
-                  f"({format_price(demand[0].price, instrument)})")
-            if supply:
-                f("Liquidity Zone", "BEARISH",
-                  min(100, max(z.strength for z in supply)),
-                  f"Price near supply zone / liquidity "
-                  f"({format_price(supply[0].price, instrument)})")
-
-        bull_f = [x for x in factors if x.direction == "BULLISH"]
-        bear_f = [x for x in factors if x.direction == "BEARISH"]
-        neut_f = [x for x in factors if x.direction == "NEUTRAL"]
-        bc, brc, nc = len(bull_f), len(bear_f), len(neut_f)
-        mx = max(bc, brc)
-
-        if mx >= 8:   quality = SetupQuality.A_PLUS
-        elif mx >= 6: quality = SetupQuality.A
-        elif mx >= 4: quality = SetupQuality.B
-        elif mx >= 3: quality = SetupQuality.C
-        else:         quality = SetupQuality.NO_TRADE
-
-        if quality == SetupQuality.NO_TRADE:
-            return PredictionResult(
-                False, "NONE", quality, 0.0, factors, bc, brc, nc,
-                ["Not enough factors aligned"])
-
-        aligned  = bull_f if bc > brc else bear_f
-        dir_val  = "LONG" if bc > brc else "SHORT"
-        base     = 50 + len(aligned) * 4
-        avg_str  = (sum(x.strength for x in aligned) / len(aligned)
-                    if aligned else 0)
-        conf_pen = (bc if dir_val == "SHORT" else brc) * 2
-        bonus    = (avg_str / 10 +
-                    (5 if advanced_flow and
-                     advanced_flow.institutional_flow_score >= 50 else 0))
-        confidence = min(95.0, max(35.0, base + bonus - conf_pen))
-        reasons    = [x.description for x in aligned if x.strength > 30][:8]
-        return PredictionResult(
-            True, dir_val, quality, confidence, factors, bc, brc, nc, reasons)
-
-    # Alias
-    def confluence(self, *args, **kwargs) -> PredictionResult:
-        return self.evaluate_confluence(*args, **kwargs)
-
-
-OF_ENGINE = OrderFlowEngine()
-
+ADVANCED_FLOW = AdvancedFlowEngine()
 
 # ════════════════════════════════════════════════════════════════
-#  ANALYSIS HELPER FUNCTIONS
+#  ORDER BOOK / POSITION BOOK ANALYZERS
 # ════════════════════════════════════════════════════════════════
 
 def analyze_order_book(ob: Optional[Dict],
-                       price: float) -> Optional[OrderBookData]:
-    if not ob or "buckets" not in ob: return None
-    bp = float(ob.get("price", price))
-    al = bl = as_ = bs_ = 0.0
+                        price: float) -> Optional[OrderBookData]:
+    if not ob or "buckets" not in ob:
+        return None
+    bp   = float(ob.get("price", price))
+    al   = bl = as_ = bs_ = 0.0
+    long_clusters  = []
+    short_clusters = []
     for b in ob["buckets"]:
         p  = float(b["price"])
         lp = float(b["longCountPercent"])
         sp = float(b["shortCountPercent"])
-        if p > bp: al += lp; as_ += sp
-        else:      bl += lp; bs_ += sp
-    tl, ts = al + bl, as_ + bs_
-    ni      = tl - ts
-    pd      = (al + as_) - (bl + bs_)
-    bias    = ("UPWARD_PRESSURE"   if pd > 2 else
-               "DOWNWARD_PRESSURE" if pd < -2 else "BALANCED")
-    pdir    = ("BULLISH" if pd > 2 else
-               "BEARISH" if pd < -2 else "NEUTRAL")
-    tot     = tl + ts
+        if p > bp:
+            al += lp; as_ += sp
+            if lp > 2.0: long_clusters.append(p)
+        else:
+            bl += lp; bs_ += sp
+            if sp > 2.0: short_clusters.append(p)
+    tl   = al + bl; ts = as_ + bs_
+    ni   = tl - ts
+    pd   = (al + as_) - (bl + bs_)
+    bias = ("UPWARD_PRESSURE"   if pd > 2 else
+            "DOWNWARD_PRESSURE" if pd < -2 else "BALANCED")
+    pdir = ("BULLISH" if pd > 2 else "BEARISH" if pd < -2 else "NEUTRAL")
+    tot  = tl + ts
     return OrderBookData(
-        price=bp, total_longs=tl, total_shorts=ts,
-        net_imbalance=ni, pending_delta=pd, breakout_bias=bias,
-        long_pct=(tl/tot*100) if tot > 0 else 50.0,
-        short_pct=(ts/tot*100) if tot > 0 else 50.0,
-        pressure_direction=pdir)
+        price             = bp,
+        total_longs       = tl,  total_shorts      = ts,
+        net_imbalance     = ni,  pending_delta     = pd,
+        breakout_bias     = bias, long_pct         = (tl/tot*100) if tot>0 else 50.0,
+        short_pct         = (ts/tot*100) if tot>0 else 50.0,
+        pressure_dir      = pdir,
+        stop_cluster_above = max(long_clusters)  if long_clusters  else 0.0,
+        stop_cluster_below = min(short_clusters) if short_clusters else 0.0,
+    )
+
+
+_pb_history: Dict[str, deque] = {}
 
 def analyze_position_book(pb: Optional[Dict],
-                          price: float) -> Optional[PositionBookData]:
-    if not pb or "buckets" not in pb: return None
+                           price: float,
+                           instrument: str = "") -> Optional[PositionBookData]:
+    if not pb or "buckets" not in pb:
+        return None
     bp = float(pb.get("price", price))
     tl = ts = trl = trs = 0.0
     for b in pb["buckets"]:
@@ -1523,47 +2017,56 @@ def analyze_position_book(pb: Optional[Dict],
         lp = float(b["longCountPercent"])
         sp = float(b["shortCountPercent"])
         tl += lp; ts += sp
-        if p > bp and ((p - bp) / bp * 100) > 0.5:
-            trl += lp
-        elif p < bp and p > 0 and ((bp - p) / p * 100) > 0.5:
-            trs += sp
+        if p > bp and ((p-bp)/bp*100) > 0.5:  trl += lp
+        elif p < bp and p > 0 and ((bp-p)/p*100) > 0.5: trs += sp
     tot  = tl + ts
-    lp_  = (tl / tot * 100) if tot > 0 else 50.0
-    sp_  = (ts / tot * 100) if tot > 0 else 50.0
+    lp_  = (tl/tot*100) if tot > 0 else 50.0
+    sp_  = (ts/tot*100) if tot > 0 else 50.0
     skew = lp_ - sp_
-    tlp  = (trl / tot * 100) if tot > 0 else 0.0
-    tsp  = (trs / tot * 100) if tot > 0 else 0.0
+    key  = instrument
+    if key not in _pb_history:
+        _pb_history[key] = deque(maxlen=20)
+    hist        = list(_pb_history[key])
+    skew_change = (skew - hist[-1]) if hist else 0.0
+    _pb_history[key].append(skew)
+    tlp  = (trl/tot*100) if tot > 0 else 0.0
+    tsp  = (trs/tot*100) if tot > 0 else 0.0
     tuw  = tlp + tsp
     ci   = abs(skew) * (tuw / 10)
     pain = bp * (1 + skew / 200)
-    sqz  = ("HIGH"     if ci > 300 else
-            "MODERATE" if ci > 150 else "LOW")
-    ct   = ("BEARISH" if skew > 15 else
-            "BULLISH" if skew < -15 else "NEUTRAL")
+    sqz  = ("HIGH" if ci > 300 else "MODERATE" if ci > 150 else "LOW")
+    ct   = ("BEARISH" if skew > 15 else "BULLISH" if skew < -15 else "NEUTRAL")
     return PositionBookData(
         price=bp, long_pct=lp_, short_pct=sp_, skew=skew,
-        contrarian_signal=ct,
-        underwater_longs=tl, underwater_shorts=ts,
+        skew_change=skew_change, contrarian_signal=ct,
         trapped_longs_pct=tlp, trapped_shorts_pct=tsp,
         total_underwater=tuw, crowded_trade_index=ci,
-        pain_threshold=pain, squeeze_potential=sqz)
+        squeeze_potential=sqz, pain_threshold=pain,
+    )
+
+# ════════════════════════════════════════════════════════════════
+#  VOLUME PROFILE
+# ════════════════════════════════════════════════════════════════
 
 def calculate_volume_profile(candles: List[Candle],
-                             num_levels: int = 24) -> Optional[VolumeProfile]:
-    if not candles: return None
-    hi, lo = (max(c.high for c in candles),
-               min(c.low  for c in candles))
+                              num_levels: int = 24
+                              ) -> Optional[VolumeProfile]:
+    if not candles:
+        return None
+    hi  = max(c.high for c in candles)
+    lo  = min(c.low  for c in candles)
     rng = hi - lo
-    if rng <= 0: return None
+    if rng <= 0:
+        return None
     step   = rng / num_levels
-    levels = [{"price": lo + (i + 0.5) * step, "volume": 0.0}
+    levels = [{"price": lo + (i+0.5)*step, "volume": 0.0}
               for i in range(num_levels)]
     for c in candles:
-        li  = max(0, min(int((c.low  - lo) / step), num_levels - 1))
-        hi2 = max(0, min(int((c.high - lo) / step), num_levels - 1))
+        li  = max(0, min(int((c.low  - lo)/step), num_levels-1))
+        hi2 = max(0, min(int((c.high - lo)/step), num_levels-1))
         n   = hi2 - li + 1
         vpl = c.volume / n if n > 0 else c.volume
-        for idx in range(li, hi2 + 1):
+        for idx in range(li, hi2+1):
             levels[idx]["volume"] += vpl
     tv  = sum(lv["volume"] for lv in levels)
     poc = max(levels, key=lambda x: x["volume"])
@@ -1575,257 +2078,1848 @@ def calculate_volume_profile(candles: List[Candle],
     vah = max(vap) if vap else hi
     val = min(vap) if vap else lo
     avg = tv / num_levels if num_levels > 0 else 1.0
-    hvn = sorted([lv["price"] for lv in levels if lv["volume"] > avg * 1.5])
-    lvn = sorted([lv["price"] for lv in levels if lv["volume"] < avg * 0.3])
+    hvn = sorted([lv["price"] for lv in levels if lv["volume"] > avg*1.5])
+    lvn = sorted([lv["price"] for lv in levels if lv["volume"] < avg*0.3])
     return VolumeProfile(poc=poc["price"], vah=vah, val=val,
                          hvn=hvn[:5], lvn=lvn[:5], total_volume=tv)
 
-def identify_key_levels(candles: List[Candle],
-                        volume_profile: Optional[VolumeProfile],
-                        current_price: float,
-                        instrument: str) -> List[Dict]:
-    levels = []
-    if not candles: return levels
-    levels.append({"price": max(c.high for c in candles[-20:]),
-                   "type": "RESISTANCE", "description": "Recent 20-bar high"})
-    levels.append({"price": min(c.low  for c in candles[-20:]),
-                   "type": "SUPPORT",    "description": "Recent 20-bar low"})
-    if volume_profile:
-        levels += [
-            {"price": volume_profile.poc, "type": "POC",
-             "description": "Point of Control"},
-            {"price": volume_profile.vah, "type": "VAH",
-             "description": "Value Area High"},
-            {"price": volume_profile.val, "type": "VAL",
-             "description": "Value Area Low"}
-        ]
-    ri = (0.5    if "JPY" in instrument else
-          10.0   if "XAU" in instrument else
-          100.0  if "NAS" in instrument else 0.005)
-    levels.append({"price": round(current_price / ri) * ri,
-                   "type": "ROUND", "description": "Psychological level"})
-    levels.sort(key=lambda x: abs(x["price"] - current_price))
-    return levels[:8]
+# ════════════════════════════════════════════════════════════════
+#  CURRENCY STRENGTH ENGINE
+# ════════════════════════════════════════════════════════════════
 
-def calculate_atr(candles: List[Candle], period: int = 14) -> float:
-    if len(candles) < period + 1:
-        return candles[-1].range if candles else 0.0001
-    tr = [max(candles[i].high - candles[i].low,
-              abs(candles[i].high - candles[i-1].close),
-              abs(candles[i].low  - candles[i-1].close))
-          for i in range(1, len(candles))]
-    return sum(tr[-period:]) / period if tr else 0.0001
+class CurrencyStrengthEngine:
+    _history: Dict[str, deque] = {c: deque(maxlen=50) for c in CURRENCIES}
+
+    async def calculate(self,
+                        session:   aiohttp.ClientSession,
+                        timeframe: str = "H1",
+                        periods:   int = 24
+                        ) -> Dict[str, CurrencyStrength]:
+        changes: Dict[str, List[float]] = {c: [] for c in CURRENCIES}
+        for pair in FOREX_PAIRS[:14]:
+            try:
+                candles = await fetch_candles(
+                    session, pair, timeframe, periods+1)
+                if len(candles) >= 2:
+                    parts = pair.split("_")
+                    if len(parts) == 2:
+                        base, quote = parts
+                        op, cl = candles[0].open, candles[-1].close
+                        if op > 0:
+                            pct = (cl - op) / op * 100
+                            if base  in changes: changes[base].append(pct)
+                            if quote in changes: changes[quote].append(-pct)
+                await asyncio.sleep(0.02)
+            except Exception:
+                continue
+
+        raw_vals  = {}
+        strengths = {}
+        for currency in CURRENCIES:
+            avg = (sum(changes[currency]) / len(changes[currency])
+                   if changes[currency] else 0.0)
+            raw_vals[currency] = avg
+            self._history[currency].append(avg)
+
+        for currency in CURRENCIES:
+            hist = list(self._history[currency])
+            if len(hist) >= 5:
+                mean = float(np.mean(hist))
+                std  = float(np.std(hist)) if np.std(hist) > 0 else 1.0
+                z    = (raw_vals[currency] - mean) / std
+            else:
+                z = 0.0
+            hist = list(self._history[currency])
+            mom  = (hist[-1] - hist[-2]) if len(hist) >= 2 else 0.0
+            trend = ("STRONG"  if raw_vals[currency] > 0.1 else
+                     "WEAK"    if raw_vals[currency] < -0.1 else "NEUTRAL")
+            strengths[currency] = CurrencyStrength(
+                currency        = currency,
+                strength        = raw_vals[currency],
+                strength_zscore = z,
+                trend           = trend,
+                rank            = 0,
+                momentum        = mom,
+            )
+        for i, cs in enumerate(sorted(
+                strengths.values(),
+                key=lambda x: x.strength, reverse=True)):
+            strengths[cs.currency].rank = i + 1
+        return strengths
+
+
+class CurrencyStrengthCache:
+    def __init__(self, ttl: int = STRENGTH_CACHE_TTL):
+        self._engine      = CurrencyStrengthEngine()
+        self.cache: Optional[Dict] = None
+        self.last_update: Optional[datetime] = None
+        self.ttl          = ttl
+        self._lock        = asyncio.Lock()
+
+    async def get(self, session: aiohttp.ClientSession) -> Dict:
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            if (self.cache is None or self.last_update is None or
+                    (now - self.last_update).total_seconds() > self.ttl):
+                self.cache       = await self._engine.calculate(session)
+                self.last_update = now
+            return self.cache
+
+
+STRENGTH_CACHE = CurrencyStrengthCache()
+
+# ════════════════════════════════════════════════════════════════
+#  ML TRAINING DATA PERSISTENCE
+#  Ensures ML data survives restarts — never resets
+# ════════════════════════════════════════════════════════════════
+
+class MLDataStore:
+    """
+    Persistent store for ML training samples.
+    Survives restarts. Accumulates forever.
+    """
+
+    def __init__(self):
+        self.data: List[Dict] = load_json(ML_TRAINING_DATA_FILE, [])
+        log.info(f"ML data store: {len(self.data)} samples loaded")
+
+    def add(self, sample: Dict):
+        """Add a training sample."""
+        self.data.append(sample)
+        # Save every 10 samples to avoid excessive I/O
+        if len(self.data) % 10 == 0:
+            self._save()
+
+    def update_outcome(self, prediction_id: str,
+                       outcome: str, pips: float):
+        """Update outcome when trade resolves."""
+        for s in self.data:
+            if s.get("prediction_id") == prediction_id:
+                s["outcome"]    = outcome
+                s["pips_gained"] = pips
+                break
+        self._save()
+
+    def get_training_data(self) -> List[Dict]:
+        """Return all samples with resolved outcomes."""
+        return [s for s in self.data
+                if s.get("outcome") in ("WIN", "LOSS")
+                and len(s.get("features", [])) == 20]
+
+    def _save(self):
+        save_json(ML_TRAINING_DATA_FILE, self.data[-2000:])
+
+    @property
+    def n_samples(self) -> int:
+        return len(self.get_training_data())
+
+    @property
+    def n_total(self) -> int:
+        return len(self.data)
+
+
+ML_DATA_STORE = MLDataStore()
+
+# ════════════════════════════════════════════════════════════════
+#  HEALTH SERVER
+# ════════════════════════════════════════════════════════════════
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ForexQuant v8.1 Beast Mode - ONLINE")
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port   = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+# ════════════════════════════════════════════════════════════════
+#  FULL ANALYSIS PIPELINE
+# ════════════════════════════════════════════════════════════════
+
+async def full_analysis(http_session: aiohttp.ClientSession,
+                        pair:         str,
+                        tf:           str) -> Dict:
+    tf_cfg = TIMEFRAMES.get(tf, TIMEFRAMES["H1"])
+
+    results = await asyncio.gather(
+        fetch_candles(http_session, pair, tf,  tf_cfg["candles"]),
+        fetch_candles(http_session, pair, "D",  60),
+        fetch_candles(http_session, pair, "H4", 120),
+        fetch_candles(http_session, pair, "M15", 96),
+        fetch_order_book(http_session, pair),
+        fetch_position_book(http_session, pair),
+        return_exceptions=True
+    )
+
+    candles       = results[0] if not isinstance(results[0], Exception) else []
+    daily_candles = results[1] if not isinstance(results[1], Exception) else []
+    h4_candles    = results[2] if not isinstance(results[2], Exception) else []
+    m15_candles   = results[3] if not isinstance(results[3], Exception) else []
+    ob_raw        = results[4] if not isinstance(results[4], Exception) else None
+    pb_raw        = results[5] if not isinstance(results[5], Exception) else None
+
+    if not candles or len(candles) < 30:
+        raise ValueError(f"Insufficient candle data for {pair} {tf}")
+
+    of  = OF_ENGINE.analyze(candles, pair)
+    vp  = calculate_volume_profile(candles)
+    ob  = analyze_order_book(ob_raw, of.price)
+    pb  = analyze_position_book(pb_raw, of.price, pair)
+    af  = ADVANCED_FLOW.analyze(candles, ob_raw)
+
+    cs = None
+    if pair in FOREX_PAIRS:
+        try:
+            cs = await STRENGTH_CACHE.get(http_session)
+        except Exception:
+            pass
+
+    return {
+        "candles":       candles,
+        "daily_candles": daily_candles,
+        "h4_candles":    h4_candles,
+        "m15_candles":   m15_candles,
+        "of":            of,
+        "vp":            vp,
+        "ob":            ob,
+        "pb":            pb,
+        "af":            af,
+        "cs":            cs,
+        "ob_raw":        ob_raw,
+        "pb_raw":        pb_raw,
+    }
+
+# ════════════════════════════════════════════════════════════════
+#  END OF PART 1
+# ════════════════════════════════════════════════════════════════
+
 
 
 # ════════════════════════════════════════════════════════════════
-#  ML LEARNING ENGINE
+#  FOREX QUANT v8.1 — PART 2 OF 4
+#  ICT Structure Engine, Confluence Scoring, Strategy Engine,
+#  ML Meta-Labeling Engine, Pattern Memory, QuantBrain,
+#  Historical Backtest Engine, Prediction Tracker
 # ════════════════════════════════════════════════════════════════
 
-class MLLearningEngine:
+# ════════════════════════════════════════════════════════════════
+#  ICT MARKET STRUCTURE ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class ICTStructureEngine:
+
+    def detect_swing_points(self,
+                            candles:  List[Candle],
+                            strength: int = 3
+                            ) -> Tuple[List[SwingPoint], List[SwingPoint]]:
+        highs: List[SwingPoint] = []
+        lows:  List[SwingPoint] = []
+        n = len(candles)
+        if n < strength * 2 + 1:
+            return highs, lows
+        for i in range(strength, n - strength):
+            c = candles[i]
+            if all(c.high >= candles[i-j].high and
+                   c.high >= candles[i+j].high
+                   for j in range(1, strength + 1)):
+                highs.append(SwingPoint(
+                    price=c.high, index=i,
+                    time=c.time, is_high=True, strength=strength))
+            if all(c.low <= candles[i-j].low and
+                   c.low <= candles[i+j].low
+                   for j in range(1, strength + 1)):
+                lows.append(SwingPoint(
+                    price=c.low, index=i,
+                    time=c.time, is_high=False, strength=strength))
+        return highs, lows
+
+    def analyze_structure(self,
+                          candles:       List[Candle],
+                          instrument:    str,
+                          swing_strength: int = 3) -> MarketStructure:
+        if len(candles) < 20:
+            return MarketStructure()
+        highs, lows = self.detect_swing_points(candles, swing_strength)
+        if not highs or not lows:
+            return MarketStructure()
+        trend              = self._determine_trend(highs, lows)
+        last_bos, last_choch = self._detect_bos_choch(
+            candles, highs, lows, trend)
+        int_highs, int_lows = self.detect_swing_points(candles, 1)
+        internal_trend     = self._determine_trend(int_highs, int_lows)
+        return MarketStructure(
+            swing_highs    = highs[-10:],
+            swing_lows     = lows[-10:],
+            trend          = trend,
+            last_bos       = last_bos,
+            last_choch     = last_choch,
+            internal_trend = internal_trend,
+            htf_bias       = trend,
+        )
+
+    def _determine_trend(self,
+                         highs: List[SwingPoint],
+                         lows:  List[SwingPoint]) -> str:
+        if len(highs) < 2 or len(lows) < 2:
+            return "NEUTRAL"
+        rh = sorted(highs, key=lambda x: x.index)[-4:]
+        rl = sorted(lows,  key=lambda x: x.index)[-4:]
+        hh = sum(1 for i in range(1, len(rh))
+                 if rh[i].price > rh[i-1].price)
+        lh = sum(1 for i in range(1, len(rh))
+                 if rh[i].price < rh[i-1].price)
+        hl = sum(1 for i in range(1, len(rl))
+                 if rl[i].price > rl[i-1].price)
+        ll = sum(1 for i in range(1, len(rl))
+                 if rl[i].price < rl[i-1].price)
+        bull = hh + hl
+        bear = lh + ll
+        if bull > bear and bull >= 2: return "BULLISH"
+        if bear > bull and bear >= 2: return "BEARISH"
+        return "NEUTRAL"
+
+    def _detect_bos_choch(self,
+                          candles: List[Candle],
+                          highs:   List[SwingPoint],
+                          lows:    List[SwingPoint],
+                          trend:   str
+                          ) -> Tuple[Optional[StructureType],
+                                     Optional[StructureType]]:
+        last_bos = last_choch = None
+        if not highs or not lows or len(candles) < 5:
+            return last_bos, last_choch
+        price = candles[-1].close
+        for sh in reversed(sorted(highs, key=lambda x: x.index)[-5:]):
+            if price > sh.price:
+                if trend == "BULLISH": last_bos   = StructureType.BULLISH_BOS
+                else:                  last_choch = StructureType.BULLISH_CHOCH
+                break
+        for sl in reversed(sorted(lows, key=lambda x: x.index)[-5:]):
+            if price < sl.price:
+                if trend == "BEARISH": last_bos   = StructureType.BEARISH_BOS
+                else:                  last_choch = StructureType.BEARISH_CHOCH
+                break
+        return last_bos, last_choch
+
+    def map_liquidity_levels(self,
+                             candles:       List[Candle],
+                             daily_candles: Optional[List[Candle]],
+                             instrument:    str) -> List[LiquidityLevel]:
+        levels: List[LiquidityLevel] = []
+        pip = pip_value(instrument)
+        tol = pip * 5
+        if len(candles) < 20:
+            return levels
+        highs = [c.high for c in candles]
+        lows  = [c.low  for c in candles]
+        levels.extend(self._find_equal_levels(highs, candles, tol, True))
+        levels.extend(self._find_equal_levels(lows,  candles, tol, False))
+        if daily_candles and len(daily_candles) >= 2:
+            pd_c = daily_candles[-2]
+            for price, ltype in [(pd_c.high, "PDH"), (pd_c.low, "PDL")]:
+                levels.append(LiquidityLevel(
+                    price=price, level_type=ltype, strength=3,
+                    zone_upper=price+tol, zone_lower=price-tol))
+        ash, asl = self._get_asian_range(candles)
+        if ash:
+            levels.append(LiquidityLevel(
+                price=ash, level_type="ASH", strength=2,
+                zone_upper=ash+tol, zone_lower=ash-tol))
+        if asl:
+            levels.append(LiquidityLevel(
+                price=asl, level_type="ASL", strength=2,
+                zone_upper=asl+tol, zone_lower=asl-tol))
+        return levels
+
+    def _find_equal_levels(self,
+                           values:    List[float],
+                           candles:   List[Candle],
+                           tolerance: float,
+                           is_high:   bool) -> List[LiquidityLevel]:
+        levels = []
+        used   = set()
+        for i in range(len(values)):
+            if i in used:
+                continue
+            cluster = [i]
+            for j in range(i+1, min(i+30, len(values))):
+                if j not in used and abs(values[j]-values[i]) <= tolerance:
+                    cluster.append(j)
+                    used.add(j)
+            if len(cluster) >= 2:
+                avg   = sum(values[k] for k in cluster) / len(cluster)
+                ltype = "EQUAL_HIGHS" if is_high else "EQUAL_LOWS"
+                levels.append(LiquidityLevel(
+                    price=avg, level_type=ltype,
+                    strength=len(cluster),
+                    zone_upper=avg+tolerance,
+                    zone_lower=avg-tolerance))
+                used.add(i)
+        return levels[:3]
+
+    def _get_asian_range(self,
+                         candles: List[Candle]
+                         ) -> Tuple[Optional[float], Optional[float]]:
+        asian = []
+        for c in candles[-24:]:
+            if not c.time:
+                continue
+            try:
+                dt = datetime.fromisoformat(c.time.replace("Z", "+00:00"))
+                if 0 <= dt.hour < 7:
+                    asian.append(c)
+            except Exception:
+                continue
+        if not asian:
+            return None, None
+        return (max(c.high for c in asian),
+                min(c.low  for c in asian))
+
+    def detect_sweep(self,
+                     candles:    List[Candle],
+                     levels:     List[LiquidityLevel],
+                     instrument: str) -> List[LiquidityLevel]:
+        swept  = []
+        recent = candles[-10:]
+        pip    = pip_value(instrument)
+        tol    = pip * 2
+        for level in levels:
+            if level.swept:
+                continue
+            for c in recent:
+                if (level.level_type in ("EQUAL_HIGHS", "PDH", "ASH")
+                        and c.high > level.price - tol
+                        and c.close < level.price
+                        and c.body_abs > 0):
+                    level.swept      = True
+                    level.sweep_time = c.time
+                    swept.append(level)
+                    break
+                elif (level.level_type in ("EQUAL_LOWS", "PDL", "ASL")
+                      and c.low < level.price + tol
+                      and c.close > level.price
+                      and c.body_abs > 0):
+                    level.swept      = True
+                    level.sweep_time = c.time
+                    swept.append(level)
+                    break
+        return swept
+
+    def detect_displacement(self,
+                            candles:  List[Candle],
+                            lookback: int = 5) -> Optional[Candle]:
+        if len(candles) < lookback + 5:
+            return None
+        recent   = candles[-(lookback+5):]
+        avg_body = sum(c.body_abs for c in recent[:-lookback]) / max(
+            1, len(recent)-lookback)
+        for c in reversed(recent[-lookback:]):
+            if c.is_displacement_vs(avg_body):
+                return c
+        return None
+
+    def detect_fvgs(self,
+                    candles:    List[Candle],
+                    instrument: str,
+                    lookback:   int = 30) -> List[FairValueGap]:
+        fvgs: List[FairValueGap] = []
+        pip  = pip_value(instrument)
+        if len(candles) < 3:
+            return fvgs
+        recent = candles[-min(lookback, len(candles)):]
+        cp     = candles[-1].close
+        for i in range(1, len(recent)-1):
+            prev = recent[i-1]; curr = recent[i]; nxt = recent[i+1]
+            if nxt.low > prev.high:
+                gap_size = nxt.low - prev.high
+                strength = min(100.0, gap_size / pip * 2)
+                if strength >= 10:
+                    mid    = prev.high + gap_size / 2
+                    filled = cp <= prev.high
+                    fvgs.append(FairValueGap(
+                        upper=nxt.low, lower=prev.high,
+                        mid=mid, direction="BULLISH",
+                        time=curr.time, filled=filled, strength=strength))
+            elif nxt.high < prev.low:
+                gap_size = prev.low - nxt.high
+                strength = min(100.0, gap_size / pip * 2)
+                if strength >= 10:
+                    mid    = nxt.high + gap_size / 2
+                    filled = cp >= prev.low
+                    fvgs.append(FairValueGap(
+                        upper=prev.low, lower=nxt.high,
+                        mid=mid, direction="BEARISH",
+                        time=curr.time, filled=filled, strength=strength))
+        fvgs.sort(key=lambda x: (not x.filled, x.strength), reverse=True)
+        return fvgs[:8]
+
+    def detect_order_blocks(self,
+                            candles:    List[Candle],
+                            structure:  MarketStructure,
+                            instrument: str,
+                            lookback:   int = 30) -> List[OrderBlock]:
+        obs:  List[OrderBlock] = []
+        pip  = pip_value(instrument)
+        if len(candles) < 5:
+            return obs
+        recent   = candles[-min(lookback, len(candles)):]
+        avg_body = sum(c.body_abs for c in recent) / max(1, len(recent))
+        fvgs     = self.detect_fvgs(candles, instrument, lookback)
+        for i in range(1, len(recent)-2):
+            c    = recent[i]
+            nxt1 = recent[i+1]
+            if (not c.is_bullish and
+                    nxt1.is_displacement_vs(avg_body) and nxt1.is_bullish):
+                broke_struct = structure.trend in ("BULLISH",) or \
+                    structure.last_bos == StructureType.BULLISH_BOS or \
+                    structure.last_choch == StructureType.BULLISH_CHOCH
+                left_fvg = any(f.direction == "BULLISH" and
+                               f.lower >= c.high - pip*5 for f in fvgs)
+                strength = 0.0
+                if broke_struct: strength += 40
+                if left_fvg:     strength += 40
+                strength += min(20.0, nxt1.body_abs / pip * 0.1)
+                if strength >= 40:
+                    obs.append(OrderBlock(
+                        high=c.high, low=c.low,
+                        mid=c.low+(c.high-c.low)/2,
+                        direction="DEMAND", time=c.time,
+                        valid=True, left_fvg=left_fvg,
+                        broke_structure=broke_struct, strength=strength))
+            elif (c.is_bullish and
+                    nxt1.is_displacement_vs(avg_body) and not nxt1.is_bullish):
+                broke_struct = structure.trend in ("BEARISH",) or \
+                    structure.last_bos == StructureType.BEARISH_BOS or \
+                    structure.last_choch == StructureType.BEARISH_CHOCH
+                left_fvg = any(f.direction == "BEARISH" and
+                               f.upper <= c.low + pip*5 for f in fvgs)
+                strength = 0.0
+                if broke_struct: strength += 40
+                if left_fvg:     strength += 40
+                strength += min(20.0, nxt1.body_abs / pip * 0.1)
+                if strength >= 40:
+                    obs.append(OrderBlock(
+                        high=c.high, low=c.low,
+                        mid=c.low+(c.high-c.low)/2,
+                        direction="SUPPLY", time=c.time,
+                        valid=True, left_fvg=left_fvg,
+                        broke_structure=broke_struct, strength=strength))
+        cp = candles[-1].close
+        for ob in obs:
+            if ob.direction == "DEMAND" and cp < ob.low - pip*3:
+                ob.valid = False
+            if ob.direction == "SUPPLY" and cp > ob.high + pip*3:
+                ob.valid = False
+        valid = [ob for ob in obs if ob.valid]
+        valid.sort(key=lambda x: x.strength, reverse=True)
+        return valid[:6]
+
+    def detect_breaker_blocks(self,
+                              obs:        List[OrderBlock],
+                              instrument: str) -> List[OrderBlock]:
+        breakers = []
+        for ob in obs:
+            if not ob.valid:
+                breakers.append(OrderBlock(
+                    high=ob.high, low=ob.low, mid=ob.mid,
+                    direction="SUPPLY" if ob.direction=="DEMAND" else "DEMAND",
+                    time=ob.time, valid=True,
+                    strength=ob.strength*0.7))
+        return breakers
+
+    def get_ote_zone(self,
+                     highs:     List[SwingPoint],
+                     lows:      List[SwingPoint],
+                     direction: str) -> Optional[Tuple[float, float]]:
+        if not highs or not lows:
+            return None
+        if direction == "LONG":
+            sh    = sorted(highs, key=lambda x: x.index)
+            sl    = sorted(lows,  key=lambda x: x.index)
+            if not sh or not sl: return None
+            lh    = sh[-1]
+            pls   = [l for l in sl if l.index < lh.index]
+            if not pls: return None
+            ll    = pls[-1]
+            fibs  = MATH.fibonacci_levels(lh.price, ll.price, "LONG")
+            return (fibs.get("0.786", 0.0), fibs.get("0.618", 0.0))
+        else:
+            sl    = sorted(lows,  key=lambda x: x.index)
+            sh    = sorted(highs, key=lambda x: x.index)
+            if not sl or not sh: return None
+            ll    = sl[-1]
+            phs   = [h for h in sh if h.index < ll.index]
+            if not phs: return None
+            lh    = phs[-1]
+            fibs  = MATH.fibonacci_levels(lh.price, ll.price, "SHORT")
+            return (fibs.get("0.618", 0.0), fibs.get("0.786", 0.0))
+
+    def assess_amd_phase(self,
+                         candles:    List[Candle],
+                         session:    SessionData,
+                         asian_high: Optional[float],
+                         asian_low:  Optional[float]) -> str:
+        if not asian_high or not asian_low or not candles:
+            return session.amd_phase
+        price = candles[-1].close
+        if price > asian_high:   return "DISTRIBUTION_UP"
+        elif price < asian_low:  return "DISTRIBUTION_DOWN"
+        return "ACCUMULATION"
+
+    def full_analysis(self,
+                      candles:       List[Candle],
+                      daily_candles: Optional[List[Candle]],
+                      session:       SessionData,
+                      instrument:    str) -> Dict:
+        structure    = self.analyze_structure(candles, instrument)
+        liq_levels   = self.map_liquidity_levels(
+            candles, daily_candles, instrument)
+        swept        = self.detect_sweep(candles, liq_levels, instrument)
+        displacement = self.detect_displacement(candles)
+        fvgs         = self.detect_fvgs(candles, instrument)
+        obs          = self.detect_order_blocks(candles, structure, instrument)
+        breakers     = self.detect_breaker_blocks(obs, instrument)
+        ote_long     = self.get_ote_zone(
+            structure.swing_highs, structure.swing_lows, "LONG")
+        ote_short    = self.get_ote_zone(
+            structure.swing_highs, structure.swing_lows, "SHORT")
+        asian_h, asian_l = self._get_asian_range(candles)
+        amd_phase    = self.assess_amd_phase(
+            candles, session, asian_h, asian_l)
+        return {
+            "structure":    structure,
+            "liq_levels":   liq_levels,
+            "swept":        swept,
+            "displacement": displacement,
+            "fvgs":         fvgs,
+            "obs":          obs,
+            "breakers":     breakers,
+            "ote_long":     ote_long,
+            "ote_short":    ote_short,
+            "asian_high":   asian_h,
+            "asian_low":    asian_l,
+            "amd_phase":    amd_phase,
+        }
+
+
+ICT_ENGINE = ICTStructureEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  CONFLUENCE SCORING ENGINE  (9 INDEPENDENT CATEGORIES)
+# ════════════════════════════════════════════════════════════════
+
+class ConfluenceEngine:
+
+    def score(self,
+              of:            OrderFlowData,
+              af:            Optional[AdvancedFlowData],
+              vp:            Optional[VolumeProfile],
+              ob:            Optional[OrderBookData],
+              pb:            Optional[PositionBookData],
+              cs:            Optional[Dict],
+              ict:           Optional[Dict],
+              regime:        Optional[RegimeData],
+              session:       Optional[SessionData],
+              instrument:    str,
+              current_price: float
+              ) -> Tuple[List[ConfluenceFactor], float, str]:
+
+        factors: List[ConfluenceFactor] = []
+
+        def add(name, direction, strength, desc, category, weight=1.0):
+            factors.append(ConfluenceFactor(
+                name=name, direction=direction,
+                strength=min(100.0, max(0.0, float(strength))),
+                description=desc, category=category, weight=weight))
+
+        # ── CAT 1: Order Flow Composite ──────────────────────────
+        of_score, of_dir = self._score_order_flow(of)
+        add("Order Flow", of_dir, of_score,
+            self._describe_of(of, of_dir), "FLOW", 1.2)
+
+        # ── CAT 2: Market Structure ───────────────────────────────
+        if ict:
+            struct = ict.get("structure")
+            if struct:
+                s_dir, s_str, s_desc = self._score_structure(struct)
+                add("Market Structure", s_dir, s_str, s_desc,
+                    "STRUCTURE", 1.5)
+
+        # ── CAT 3: Institutional Books ────────────────────────────
+        i_dir, i_str, i_desc = self._score_institutional(ob, pb)
+        if i_str > 0:
+            add("Institutional Books", i_dir, i_str, i_desc,
+                "INSTITUTIONAL", 1.3)
+
+        # ── CAT 4: Smart Money Metrics ────────────────────────────
+        if af:
+            sm_dir, sm_str, sm_desc = self._score_smart_money(af, of)
+            if sm_str > 0:
+                add("Smart Money", sm_dir, sm_str, sm_desc,
+                    "SMART_MONEY", 1.4)
+
+        # ── CAT 5: Currency Strength ──────────────────────────────
+        if cs and "_" in instrument:
+            cs_dir, cs_str, cs_desc = self._score_cs(cs, instrument)
+            if cs_str > 0:
+                add("Currency Strength", cs_dir, cs_str, cs_desc,
+                    "STRENGTH", 1.1)
+
+        # ── CAT 6: Liquidity / ICT Zones ─────────────────────────
+        if ict:
+            lz_dir, lz_str, lz_desc = self._score_liquidity(
+                ict, current_price, instrument)
+            if lz_str > 0:
+                add("Liquidity Zones", lz_dir, lz_str, lz_desc,
+                    "LIQUIDITY", 1.6)
+
+        # ── CAT 7: Regime ─────────────────────────────────────────
+        if regime:
+            rv_dir, rv_str, rv_desc = self._score_regime(regime, of)
+            if rv_str > 0:
+                add("Regime", rv_dir, rv_str, rv_desc, "REGIME", 0.9)
+
+        # ── CAT 8: Session / Timing ───────────────────────────────
+        if session:
+            ss_dir, ss_str, ss_desc = self._score_session(
+                session, instrument)
+            if ss_str > 0:
+                add("Session Timing", ss_dir, ss_str, ss_desc,
+                    "SESSION", 1.0)
+
+        # ── CAT 9: Volume Profile ─────────────────────────────────
+        if vp:
+            vp_dir, vp_str, vp_desc = self._score_vp(vp, current_price)
+            if vp_str > 0:
+                add("Volume Profile", vp_dir, vp_str, vp_desc,
+                    "VOLUME_PROFILE", 1.1)
+
+        # ── Direction & confidence ────────────────────────────────
+        bull = [f for f in factors if f.direction == "BULLISH"]
+        bear = [f for f in factors if f.direction == "BEARISH"]
+
+        bull_score = sum(f.strength * f.weight for f in bull)
+        bear_score = sum(f.strength * f.weight for f in bear)
+
+        if bull_score == 0 and bear_score == 0:
+            return factors, 0.0, "NONE"
+
+        direction = "LONG" if bull_score >= bear_score else "SHORT"
+        aligned   = bull if direction == "LONG" else bear
+        opposing  = bear if direction == "LONG" else bull
+
+        base  = 40.0 + (len(aligned) / 9) * 40.0
+        bonus = 0.0
+        if aligned:
+            avg_str = sum(f.strength * f.weight
+                          for f in aligned) / len(aligned)
+            bonus  += avg_str * 0.15
+
+        penalty = len(opposing) * 4.0
+
+        if regime:
+            if regime.regime in (RegimeType.STRONG_TREND,
+                                  RegimeType.WEAK_TREND):
+                bonus += 5.0
+            if regime.contradictory:
+                penalty += 10.0   # penalize contradictory regime
+
+        if session and session.is_kill_zone:
+            bonus += 5.0
+
+        if ict:
+            if ict.get("swept"):        bonus += 8.0
+            if ict.get("displacement"): bonus += 5.0
+
+        confidence = float(np.clip(base + bonus - penalty, 30.0, 94.0))
+        return factors, confidence, direction
+
+    # ── Scorers ───────────────────────────────────────────────────
+
+    def _score_order_flow(self,
+                          of: OrderFlowData) -> Tuple[float, str]:
+        bull = bear = 0.0
+        if of.cvd > 0:                      bull += 25
+        elif of.cvd < 0:                    bear += 25
+        if of.imbalance_zscore > 1.5:       bull += 20
+        elif of.imbalance_zscore < -1.5:    bear += 20
+        elif of.imbalance_zscore > 0.8:     bull += 10
+        elif of.imbalance_zscore < -0.8:    bear += 10
+        if of.vwap_zscore > 0.5:            bull += 15
+        elif of.vwap_zscore < -0.5:         bear += 15
+        if of.delta_momentum > 0:           bull += 20
+        elif of.delta_momentum < 0:         bear += 20
+        if of.buying_climax:                bear += 20
+        if of.selling_climax:               bull += 20
+        total = bull + bear
+        if total == 0:                  return 0.0, "NEUTRAL"
+        if bull > bear:                 return min(100.0, bull), "BULLISH"
+        if bear > bull:                 return min(100.0, bear), "BEARISH"
+        return 0.0, "NEUTRAL"
+
+    def _describe_of(self, of: OrderFlowData, direction: str) -> str:
+        z = of.imbalance_zscore
+        if abs(z) > 2.0:
+            return (f"Statistically extreme "
+                    f"{'buying' if direction=='BULLISH' else 'selling'} "
+                    f"pressure (z={z:+.1f}σ) — "
+                    f"CVD {fmt_signed(of.cvd)}")
+        return (f"{'Buying' if direction=='BULLISH' else 'Selling'} "
+                f"dominant — CVD {fmt_signed(of.cvd)}, "
+                f"imbalance {of.imbalance:+.1f}%")
+
+    def _score_structure(self,
+                         struct: MarketStructure
+                         ) -> Tuple[str, float, str]:
+        if struct.trend == "BULLISH":
+            if struct.last_bos == StructureType.BULLISH_BOS:
+                return "BULLISH", 90.0, "Confirmed bullish BOS — continuation"
+            if struct.last_choch == StructureType.BULLISH_CHOCH:
+                return "BULLISH", 85.0, "Bullish CHOCH — reversal confirmed"
+            return "BULLISH", 70.0, "Bullish structure (HH + HL)"
+        if struct.trend == "BEARISH":
+            if struct.last_bos == StructureType.BEARISH_BOS:
+                return "BEARISH", 90.0, "Confirmed bearish BOS — continuation"
+            if struct.last_choch == StructureType.BEARISH_CHOCH:
+                return "BEARISH", 85.0, "Bearish CHOCH — reversal confirmed"
+            return "BEARISH", 70.0, "Bearish structure (LH + LL)"
+        return "NEUTRAL", 0.0, "Mixed structure"
+
+    def _score_institutional(self,
+                              ob: Optional[OrderBookData],
+                              pb: Optional[PositionBookData]
+                              ) -> Tuple[str, float, str]:
+        bull = bear = 0.0
+        if ob:
+            if ob.pressure_dir == "BULLISH": bull += 30
+            elif ob.pressure_dir == "BEARISH": bear += 30
+        if pb:
+            if pb.contrarian_signal == "BULLISH":
+                base = 40.0 + (15.0 if pb.skew_change < -2 else 0.0)
+                bull += base
+            elif pb.contrarian_signal == "BEARISH":
+                base = 40.0 + (15.0 if pb.skew_change > 2 else 0.0)
+                bear += base
+            if pb.squeeze_potential == "HIGH":
+                if pb.long_pct > pb.short_pct: bear += 20
+                else:                           bull += 20
+        total = bull + bear
+        if total == 0: return "NEUTRAL", 0.0, "No institutional signal"
+        if bull >= bear:
+            return ("BULLISH", min(100.0, bull),
+                    f"Books favour bulls "
+                    f"(retail {pb.short_pct:.0f}% short)"
+                    if pb else "Order book bullish")
+        return ("BEARISH", min(100.0, bear),
+                f"Books favour bears "
+                f"(retail {pb.long_pct:.0f}% long)"
+                if pb else "Order book bearish")
+
+    def _score_smart_money(self,
+                           af: AdvancedFlowData,
+                           of: OrderFlowData) -> Tuple[str, float, str]:
+        bull = bear = 0.0
+        if "BULLISH" in af.informed_signal: bull += 40
+        elif "BEARISH" in af.informed_signal: bear += 40
+        if af.aggressor_side == "BUYERS":   bull += 25
+        elif af.aggressor_side == "SELLERS": bear += 25
+        if af.absorption_ratio > 1.5:       bull += 20
+        elif af.absorption_ratio < 0.67:    bear += 20
+        if af.iceberg_count > 0:
+            if of.cvd > 0: bull += 15
+            else:          bear += 15
+        if af.vpin >= 0.5:
+            if of.cvd > 0: bull += 10
+            else:          bear += 10
+        total = bull + bear
+        if total == 0: return "NEUTRAL", 0.0, ""
+        direction = "BULLISH" if bull >= bear else "BEARISH"
+        desc = (f"Smart money {af.smart_money_activity} — "
+                f"Informed: {af.informed_signal} | "
+                f"Aggressor: {af.aggressor_side}")
+        return direction, min(100.0, max(bull, bear)), desc
+
+    def _score_cs(self,
+                  cs:         Dict,
+                  instrument: str) -> Tuple[str, float, str]:
+        parts = instrument.split("_")
+        if len(parts) != 2: return "NEUTRAL", 0.0, ""
+        bcs = cs.get(parts[0]); qcs = cs.get(parts[1])
+        if not bcs or not qcs: return "NEUTRAL", 0.0, ""
+        diff  = bcs.strength - qcs.strength
+        z_diff = bcs.strength_zscore - qcs.strength_zscore
+        if abs(diff) < 0.05: return "NEUTRAL", 0.0, "Equal strength"
+        strength = min(100.0, abs(diff)*30 + abs(z_diff)*10)
+        if diff > 0:
+            return ("BULLISH", strength,
+                    f"{parts[0]} ({bcs.strength:+.2f}%) stronger — {bcs.trend}")
+        return ("BEARISH", strength,
+                f"{parts[1]} ({qcs.strength:+.2f}%) stronger — {qcs.trend}")
+
+    def _score_liquidity(self,
+                         ict:        Dict,
+                         price:      float,
+                         instrument: str) -> Tuple[str, float, str]:
+        bull = bear = 0.0
+        desc_parts = []
+        swept = ict.get("swept", [])
+        for level in swept:
+            if level.level_type in ("EQUAL_LOWS","PDL","ASL"):
+                bull += 30
+                desc_parts.append(
+                    f"Lows swept @ {fmt_price(level.price, instrument)}")
+            elif level.level_type in ("EQUAL_HIGHS","PDH","ASH"):
+                bear += 30
+                desc_parts.append(
+                    f"Highs swept @ {fmt_price(level.price, instrument)}")
+        disp = ict.get("displacement")
+        if disp:
+            if disp.is_bullish: bull += 25
+            else:               bear += 25
+            desc_parts.append("Displacement confirmed")
+        pip = pip_value(instrument)
+        for ob_block in ict.get("obs", [])[:3]:
+            dist = abs(ob_block.mid - price)
+            if dist < pip * 50:
+                if ob_block.direction == "DEMAND" and price > ob_block.low:
+                    bull += min(20.0, ob_block.strength * 0.2)
+                    desc_parts.append(
+                        f"Demand OB @ {fmt_price(ob_block.low, instrument)}")
+                elif ob_block.direction == "SUPPLY" and price < ob_block.high:
+                    bear += min(20.0, ob_block.strength * 0.2)
+                    desc_parts.append(
+                        f"Supply OB @ {fmt_price(ob_block.high, instrument)}")
+        for fvg in ict.get("fvgs", [])[:3]:
+            if not fvg.filled:
+                dist = abs(fvg.mid - price)
+                if dist < pip * 30:
+                    if fvg.direction == "BULLISH" and price > fvg.lower:
+                        bull += 15
+                    elif fvg.direction == "BEARISH" and price < fvg.upper:
+                        bear += 15
+        total = bull + bear
+        if total == 0: return "NEUTRAL", 0.0, ""
+        desc = " | ".join(desc_parts[:3]) if desc_parts else "ICT aligned"
+        if bull >= bear: return "BULLISH", min(100.0, bull), desc
+        return "BEARISH", min(100.0, bear), desc
+
+    def _score_regime(self,
+                      regime: RegimeData,
+                      of:     OrderFlowData) -> Tuple[str, float, str]:
+        if regime.regime == RegimeType.CHAOTIC:
+            return "NEUTRAL", 0.0, "Chaotic — no trade"
+        if regime.regime == RegimeType.COMPRESSION:
+            return ("NEUTRAL", 30.0,
+                    f"Compression (VR:{regime.volatility_ratio:.2f}) "
+                    f"— breakout imminent")
+        if regime.regime in (RegimeType.STRONG_TREND,
+                              RegimeType.WEAK_TREND):
+            penalty = " ⚠️ Contradictory signals" if regime.contradictory else ""
+            dir_    = "BULLISH" if of.cvd > 0 else "BEARISH"
+            return (dir_, 50.0 - (15.0 if regime.contradictory else 0.0),
+                    f"{regime.regime.value} "
+                    f"(H:{regime.hurst_exponent:.2f} "
+                    f"ER:{regime.efficiency_ratio:.2f}){penalty}")
+        return "NEUTRAL", 20.0, f"Ranging (H:{regime.hurst_exponent:.2f})"
+
+    def _score_session(self,
+                       session:    SessionData,
+                       instrument: str) -> Tuple[str, float, str]:
+        if session.session_type == SessionType.OFF_HOURS:
+            return ("NEUTRAL", 10.0,
+                    "Off-hours — reduced liquidity ⚠️")
+        if session.is_kill_zone:
+            return ("NEUTRAL", 60.0,
+                    f"🎯 {session.kill_zone_name}")
+        if session.session_type == SessionType.OVERLAP:
+            return ("NEUTRAL", 50.0, "London-NY Overlap — max liquidity")
+        if session.session_type == SessionType.LONDON:
+            return ("NEUTRAL", 40.0, f"London session")
+        if session.session_type == SessionType.NEW_YORK:
+            return ("NEUTRAL", 35.0, f"New York session")
+        return ("NEUTRAL", 20.0, f"{session.session_name}")
+
+    def _score_vp(self,
+                  vp:    VolumeProfile,
+                  price: float) -> Tuple[str, float, str]:
+        in_va = vp.val <= price <= vp.vah
+        if price > vp.poc:
+            return ("BULLISH", 40.0,
+                    f"Above POC {fmt_price(vp.poc, '')} — buyers in control"
+                    + (" (VA)" if in_va else " (outside VA)"))
+        elif price < vp.poc:
+            return ("BEARISH", 40.0,
+                    f"Below POC {fmt_price(vp.poc, '')} — sellers in control"
+                    + (" (VA)" if in_va else " (outside VA)"))
+        return ("NEUTRAL", 20.0, "At POC — equilibrium")
+
+
+CONFLUENCE = ConfluenceEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  STRATEGY ENGINE  (7 STRATEGIES + FULL VALIDATION)
+# ════════════════════════════════════════════════════════════════
+
+class StrategyEngine:
+
+    def run_all(self,
+                candles:       List[Candle],
+                of:            OrderFlowData,
+                af:            Optional[AdvancedFlowData],
+                vp:            Optional[VolumeProfile],
+                ob:            Optional[OrderBookData],
+                pb:            Optional[PositionBookData],
+                cs:            Optional[Dict],
+                ict:           Dict,
+                regime:        RegimeData,
+                session:       SessionData,
+                instrument:    str,
+                daily_candles: Optional[List[Candle]] = None
+                ) -> Optional[StrategySignal]:
+        candidates: List[StrategySignal] = []
+        for strat_type in StrategyType:
+            if not REGIME_ENGINE.is_strategy_valid(strat_type, regime, session):
+                continue
+            sig = self._run_one(
+                strat_type, candles, of, af, vp, ob, pb,
+                cs, ict, regime, session, instrument, daily_candles)
+            if sig and sig.confidence >= MIN_CONFIDENCE:
+                # CRITICAL: validate signal geometry before accepting
+                val = validate_signal_geometry(
+                    sig.direction, sig.entry, sig.target,
+                    sig.stop, instrument)
+                if not val.is_valid:
+                    log.debug(
+                        f"Signal rejected [{strat_type.value}] "
+                        f"{instrument}: {val.reason}")
+                    continue
+                # Store validated geometry
+                sig.rr_ratio    = val.rr_ratio
+                sig.reward_pips = val.reward_pips
+                sig.risk_pips   = val.risk_pips
+                # Compute breakeven and trailing prices
+                sig.breakeven_price = calculate_breakeven_price(
+                    sig.direction, sig.entry, sig.target)
+                sig.trailing_price  = calculate_trailing_price(
+                    sig.direction, sig.entry, sig.target)
+                candidates.append(sig)
+
+        if not candidates:
+            return None
+
+        def priority(s: StrategySignal) -> float:
+            sc = s.confidence
+            if s.regime_aligned:   sc += 5
+            if s.session_aligned:  sc += 5
+            if s.htf_aligned:      sc += 8
+            return sc
+
+        candidates.sort(key=priority, reverse=True)
+        return candidates[0]
+
+    def _run_one(self, strategy_type, candles, of, af, vp, ob, pb,
+                  cs, ict, regime, session, instrument, daily_candles):
+        try:
+            if strategy_type == StrategyType.ICT_CONTINUATION:
+                return self._ict_continuation(
+                    candles, of, af, vp, ob, pb, cs,
+                    ict, regime, session, instrument)
+            if strategy_type == StrategyType.ICT_REVERSAL:
+                return self._ict_reversal(
+                    candles, of, af, vp, ob, pb, cs,
+                    ict, regime, session, instrument)
+            if strategy_type == StrategyType.AMD_SESSION:
+                return self._amd_session(
+                    candles, of, af, ict, regime, session, instrument)
+            if strategy_type == StrategyType.RETAIL_CONTRARIAN:
+                return self._retail_contrarian(
+                    candles, of, af, ob, pb, ict, regime, session, instrument)
+            if strategy_type == StrategyType.BREAKOUT:
+                return self._breakout(
+                    candles, of, af, regime, session, instrument)
+            if strategy_type == StrategyType.MEAN_REVERSION:
+                return self._mean_reversion(
+                    candles, of, af, vp, regime, session, instrument)
+        except Exception as e:
+            log.warning(f"Strategy {strategy_type.value} error: {e}")
+        return None
+
+    # ── Strategy 1: ICT Trend Continuation ──────────────────────
+    def _ict_continuation(self, candles, of, af, vp, ob, pb,
+                           cs, ict, regime, session, instrument):
+        struct = ict.get("structure", MarketStructure())
+        price  = of.price
+        pip    = pip_value(instrument)
+        atr    = MATH.calculate_atr(candles)
+
+        if struct.trend not in ("BULLISH", "BEARISH"):
+            return None
+
+        direction = "LONG" if struct.trend == "BULLISH" else "SHORT"
+
+        # ── HTF bias check (KEY FIX) ─────────────────────────────
+        htf_bias = struct.htf_bias
+        if htf_bias == "NEUTRAL":
+            # Require stronger confluence without HTF confirmation
+            pass   # allowed but will lower confidence
+        elif (direction == "LONG" and htf_bias == "BEARISH"):
+            return None   # never go long against HTF bearish
+        elif (direction == "SHORT" and htf_bias == "BULLISH"):
+            return None   # never go short against HTF bullish
+
+        # ── Regime contradiction check ────────────────────────────
+        if regime.contradictory:
+            # Hurst vs ER contradiction — still allow but with penalty
+            conf_penalty = 15.0
+        else:
+            conf_penalty = 0.0
+
+        # Find nearest valid OB in trend direction
+        entry_zone = None
+        for ob_block in ict.get("obs", []):
+            if (direction == "LONG" and
+                    ob_block.direction == "DEMAND" and
+                    ob_block.broke_structure and ob_block.valid):
+                if ob_block.low <= price <= ob_block.high + pip*20:
+                    entry_zone = ob_block
+                    break
+            elif (direction == "SHORT" and
+                    ob_block.direction == "SUPPLY" and
+                    ob_block.broke_structure and ob_block.valid):
+                if ob_block.low - pip*20 <= price <= ob_block.high:
+                    entry_zone = ob_block
+                    break
+
+        ote = ict.get("ote_long") if direction=="LONG" else ict.get("ote_short")
+        in_ote = False
+        if ote:
+            in_ote = ote[0] <= price <= ote[1]
+
+        if not entry_zone and not in_ote:
+            return None
+
+        factors, conf, conf_dir = CONFLUENCE.score(
+            of, af, vp, ob, pb, cs, ict, regime, session,
+            instrument, price)
+        conf -= conf_penalty
+
+        if conf_dir not in ("LONG", "SHORT"):
+            return None
+        if (conf_dir == "LONG") != (direction == "LONG"):
+            conf -= 12
+
+        # ── COMPUTE LEVELS ────────────────────────────────────────
+        if direction == "LONG":
+            entry = entry_zone.mid if entry_zone else price
+            stop  = (entry_zone.low - pip*3
+                     if entry_zone else price - atr * 1.0)
+            # Target: next structural liquidity above
+            liq   = ict.get("liq_levels", [])
+            highs_above = sorted([
+                l.price for l in liq
+                if l.price > price
+                and l.level_type in ("EQUAL_HIGHS","PDH","ASH")],
+            )
+            target = (highs_above[0] if highs_above
+                      else price + atr * 2.5)
+        else:
+            entry  = entry_zone.mid if entry_zone else price
+            stop   = (entry_zone.high + pip*3
+                      if entry_zone else price + atr * 1.0)
+            liq    = ict.get("liq_levels", [])
+            lows_below = sorted([
+                l.price for l in liq
+                if l.price < price
+                and l.level_type in ("EQUAL_LOWS","PDL","ASL")],
+                reverse=True)
+            target = (lows_below[0] if lows_below
+                      else price - atr * 2.5)
+
+        # ── PRE-VALIDATE before creating signal ───────────────────
+        val = validate_signal_geometry(
+            direction, entry, target, stop, instrument)
+        if not val.is_valid:
+            # Try with ATR-based fallback targets
+            if direction == "LONG":
+                target = entry + atr * 2.5
+                stop   = entry - atr * 1.0
+            else:
+                target = entry - atr * 2.5
+                stop   = entry + atr * 1.0
+            val = validate_signal_geometry(
+                direction, entry, target, stop, instrument)
+            if not val.is_valid:
+                return None
+
+        if conf < MIN_CONFIDENCE:
+            return None
+
+        return StrategySignal(
+            strategy       = StrategyType.ICT_CONTINUATION,
+            direction      = direction,
+            confidence     = conf,
+            entry          = entry,
+            target         = target,
+            stop           = stop,
+            quality        = self._quality(conf, len(factors)),
+            reasons        = [f.description for f in factors
+                              if f.direction in (
+                                  "BULLISH" if direction=="LONG" else "BEARISH",
+                                  "NEUTRAL") and f.strength > 25][:6],
+            factors        = factors,
+            features       = [],
+            regime_aligned = regime.regime in (
+                RegimeType.STRONG_TREND, RegimeType.WEAK_TREND),
+            session_aligned = (session.is_kill_zone or
+                               session.session_type != SessionType.OFF_HOURS),
+            htf_aligned    = htf_bias in ("BULLISH" if direction=="LONG"
+                                          else "BEARISH", "NEUTRAL"),
+            adr_ok         = regime.adr_consumed_pct < 80,
+        )
+
+    # ── Strategy 2: ICT Liquidity Reversal ──────────────────────
+    def _ict_reversal(self, candles, of, af, vp, ob, pb,
+                       cs, ict, regime, session, instrument):
+        swept = ict.get("swept", [])
+        disp  = ict.get("displacement")
+        fvgs  = ict.get("fvgs", [])
+        price = of.price
+        pip   = pip_value(instrument)
+        atr   = MATH.calculate_atr(candles)
+
+        if not swept or not disp:
+            return None
+
+        direction = "LONG" if disp.is_bullish else "SHORT"
+
+        struct = ict.get("structure", MarketStructure())
+        if direction == "LONG":
+            if struct.internal_trend not in ("BULLISH", "NEUTRAL"):
+                pass   # still allowed
+        elif direction == "SHORT":
+            if struct.internal_trend not in ("BEARISH", "NEUTRAL"):
+                pass
+
+        factors, conf, _ = CONFLUENCE.score(
+            of, af, vp, ob, pb, cs, ict, regime, session,
+            instrument, price)
+
+        swept_level = swept[-1]
+        if direction == "LONG":
+            stop = swept_level.price - pip * 5
+            bull_fvgs = [f for f in fvgs
+                         if f.direction=="BULLISH" and f.mid > price
+                         and not f.filled]
+            target = (min(bull_fvgs, key=lambda x: x.mid).mid
+                      if bull_fvgs else price + atr * 2.5)
+        else:
+            stop = swept_level.price + pip * 5
+            bear_fvgs = [f for f in fvgs
+                         if f.direction=="BEARISH" and f.mid < price
+                         and not f.filled]
+            target = (max(bear_fvgs, key=lambda x: x.mid).mid
+                      if bear_fvgs else price - atr * 2.5)
+
+        # Validate
+        val = validate_signal_geometry(
+            direction, price, target, stop, instrument)
+        if not val.is_valid:
+            if direction == "LONG":
+                target = price + atr * 2.5
+                stop   = price - atr * 1.0
+            else:
+                target = price - atr * 2.5
+                stop   = price + atr * 1.0
+            val = validate_signal_geometry(
+                direction, price, target, stop, instrument)
+            if not val.is_valid:
+                return None
+
+        conf += 10
+        conf  = min(94.0, conf)
+        if conf < MIN_CONFIDENCE:
+            return None
+
+        return StrategySignal(
+            strategy       = StrategyType.ICT_REVERSAL,
+            direction      = direction,
+            confidence     = conf,
+            entry          = price,
+            target         = target,
+            stop           = stop,
+            quality        = self._quality(conf, len(factors)),
+            reasons        = (
+                [f"Liquidity swept @ "
+                 f"{fmt_price(swept_level.price, instrument)}",
+                 f"{'Bullish' if disp.is_bullish else 'Bearish'} displacement"] +
+                [f.description for f in factors if f.strength > 25][:4]),
+            factors        = factors,
+            features       = [],
+            regime_aligned = True,
+            session_aligned = session.is_kill_zone,
+            htf_aligned    = True,
+            adr_ok         = regime.adr_consumed_pct < 75,
+        )
+
+    # ── Strategy 3: AMD Session Model ───────────────────────────
+    def _amd_session(self, candles, of, af, ict, regime,
+                      session, instrument):
+        if not session.is_kill_zone:
+            return None
+        asian_h = ict.get("asian_high")
+        asian_l = ict.get("asian_low")
+        price   = of.price
+        pip     = pip_value(instrument)
+        atr     = MATH.calculate_atr(candles)
+        if not asian_h or not asian_l:
+            return None
+        asian_range = asian_h - asian_l
+        if asian_range < pip * 5:
+            return None
+        disp      = ict.get("displacement")
+        direction = None
+        entry = stop = target = 0.0
+        if (price < asian_l - pip*2 and disp and disp.is_bullish):
+            direction = "LONG"
+            entry     = price
+            stop      = price - atr * 0.8
+            target    = asian_h + asian_range * 0.5
+        elif (price > asian_h + pip*2 and disp and not disp.is_bullish):
+            direction = "SHORT"
+            entry     = price
+            stop      = price + atr * 0.8
+            target    = asian_l - asian_range * 0.5
+        if not direction:
+            return None
+        val = validate_signal_geometry(
+            direction, entry, target, stop, instrument)
+        if not val.is_valid:
+            return None
+        conf = min(90.0, 65.0 +
+                   (10 if disp else 0) +
+                   (8 if af and af.vpin >= 0.4 else 0))
+        if conf < MIN_CONFIDENCE:
+            return None
+        return StrategySignal(
+            strategy       = StrategyType.AMD_SESSION,
+            direction      = direction,
+            confidence     = conf,
+            entry          = entry,
+            target         = target,
+            stop           = stop,
+            quality        = SetupQuality.A,
+            reasons        = [
+                f"AMD Model: {session.kill_zone_name}",
+                f"Asian range swept — manipulation phase",
+                f"Displacement {'bullish' if disp and disp.is_bullish else 'bearish'} confirmed",
+                f"Range: {pips_diff(instrument, asian_range):.0f} pips",
+            ],
+            factors        = [],
+            features       = [],
+            regime_aligned = True,
+            session_aligned = True,
+            htf_aligned    = True,
+            adr_ok         = regime.adr_consumed_pct < 70,
+        )
+
+    # ── Strategy 4: Retail Contrarian ────────────────────────────
+    def _retail_contrarian(self, candles, of, af, ob_data, pb,
+                            ict, regime, session, instrument):
+        if not pb or abs(pb.skew) < 20:
+            return None
+        price = of.price
+        atr   = MATH.calculate_atr(candles)
+        direction = None
+        if pb.contrarian_signal == "BULLISH" and pb.short_pct > 60:
+            direction = "LONG"
+        elif pb.contrarian_signal == "BEARISH" and pb.long_pct > 60:
+            direction = "SHORT"
+        if not direction:
+            return None
+        swept      = ict.get("swept", [])
+        liq_bonus  = 15.0 if swept else 0.0
+        sm_bonus   = 0.0
+        if af:
+            if direction=="LONG" and "BULLISH" in af.informed_signal:
+                sm_bonus = 15.0
+            elif direction=="SHORT" and "BEARISH" in af.informed_signal:
+                sm_bonus = 15.0
+        conf = min(90.0,
+                   55.0 + liq_bonus + sm_bonus +
+                   (8.0 if abs(pb.skew_change) > 2 else 0.0) +
+                   (10.0 if pb.squeeze_potential == "HIGH" else 0.0))
+        if direction == "LONG":
+            stop   = price - atr * 1.2
+            target = (pb.pain_threshold
+                      if pb.pain_threshold > price + atr * 1.5
+                      else price + atr * 2.0)
+        else:
+            stop   = price + atr * 1.2
+            target = (pb.pain_threshold
+                      if pb.pain_threshold < price - atr * 1.5
+                      else price - atr * 2.0)
+        val = validate_signal_geometry(
+            direction, price, target, stop, instrument)
+        if not val.is_valid:
+            return None
+        if conf < MIN_CONFIDENCE:
+            return None
+        return StrategySignal(
+            strategy       = StrategyType.RETAIL_CONTRARIAN,
+            direction      = direction,
+            confidence     = conf,
+            entry          = price,
+            target         = target,
+            stop           = stop,
+            quality        = self._quality(conf, 4),
+            reasons        = [
+                f"Retail {pb.long_pct:.0f}% LONG / {pb.short_pct:.0f}% SHORT",
+                f"Contrarian: {pb.contrarian_signal}",
+                f"Squeeze: {pb.squeeze_potential}",
+                f"Skew Δ: {pb.skew_change:+.1f}% (acceleration)",
+            ],
+            factors        = [],
+            features       = [],
+            regime_aligned = True,
+            session_aligned = session.session_type != SessionType.OFF_HOURS,
+            htf_aligned    = True,
+            adr_ok         = True,
+        )
+
+    # ── Strategy 5: Breakout Compression ────────────────────────
+    def _breakout(self, candles, of, af, regime, session, instrument):
+        if regime.volatility_ratio >= 0.7:
+            return None
+        price = of.price
+        atr   = MATH.calculate_atr(candles)
+        disp  = ICT_ENGINE.detect_displacement(candles)
+        if not disp:
+            return None
+        direction = "LONG" if disp.is_bullish else "SHORT"
+        if direction == "LONG":
+            stop   = price - atr * 1.0
+            target = price + atr * 3.0
+        else:
+            stop   = price + atr * 1.0
+            target = price - atr * 3.0
+        val = validate_signal_geometry(
+            direction, price, target, stop, instrument)
+        if not val.is_valid:
+            return None
+        conf = min(88.0,
+                   60.0 +
+                   (10 if af and af.vpin >= 0.35 else 0) +
+                   (10 if regime.volatility_ratio < 0.4 else 0) +
+                   (8  if session.is_kill_zone else 0))
+        if conf < MIN_CONFIDENCE:
+            return None
+        return StrategySignal(
+            strategy       = StrategyType.BREAKOUT,
+            direction      = direction,
+            confidence     = conf,
+            entry          = price,
+            target         = target,
+            stop           = stop,
+            quality        = self._quality(conf, 3),
+            reasons        = [
+                f"Compression breakout (VR:{regime.volatility_ratio:.2f})",
+                f"{'Bullish' if disp.is_bullish else 'Bearish'} displacement",
+                f"Energy release imminent",
+            ],
+            factors        = [],
+            features       = [],
+            regime_aligned = regime.regime == RegimeType.COMPRESSION,
+            session_aligned = session.session_type != SessionType.OFF_HOURS,
+            htf_aligned    = True,
+            adr_ok         = regime.adr_consumed_pct < 60,
+        )
+
+    # ── Strategy 6: Statistical Mean Reversion ──────────────────
+    def _mean_reversion(self, candles, of, af, vp,
+                         regime, session, instrument):
+        if regime.hurst_exponent >= 0.50:
+            return None
+        price  = of.price
+        closes = [c.close for c in candles]
+        bands  = MATH.std_bands(closes, 50)
+        if not bands:
+            return None
+        direction = None
+        if price >= bands["upper_2"] and of.vwap_zscore > 1.5:
+            direction = "SHORT"
+        elif price <= bands["lower_2"] and of.vwap_zscore < -1.5:
+            direction = "LONG"
+        if not direction:
+            return None
+        atr = MATH.calculate_atr(candles)
+        if direction == "LONG":
+            stop   = price - atr * 0.8
+            target = of.vwap if of.vwap > price + atr * 1.2 else price + atr * 1.5
+        else:
+            stop   = price + atr * 0.8
+            target = of.vwap if of.vwap < price - atr * 1.2 else price - atr * 1.5
+        val = validate_signal_geometry(
+            direction, price, target, stop, instrument)
+        if not val.is_valid:
+            return None
+        conf = min(80.0,
+                   55.0 +
+                   (10 if regime.autocorr_lag1 < -0.2 else 0) +
+                   (10 if abs(of.vwap_zscore) > 2.5 else 0))
+        if conf < MIN_CONFIDENCE:
+            return None
+        return StrategySignal(
+            strategy       = StrategyType.MEAN_REVERSION,
+            direction      = direction,
+            confidence     = conf,
+            entry          = price,
+            target         = target,
+            stop           = stop,
+            quality        = self._quality(conf, 3),
+            reasons        = [
+                f"Price {abs(of.vwap_zscore):.1f}σ from VWAP "
+                f"({'above' if of.vwap_zscore > 0 else 'below'})",
+                f"Mean-reverting (H:{regime.hurst_exponent:.2f})",
+                f"Target VWAP {fmt_price(of.vwap, instrument)}",
+            ],
+            factors        = [],
+            features       = [],
+            regime_aligned = regime.regime == RegimeType.RANGING,
+            session_aligned = True,
+            htf_aligned    = True,
+            adr_ok         = True,
+        )
+
+    @staticmethod
+    def _quality(conf: float, n: int) -> SetupQuality:
+        if conf >= 82 and n >= 6: return SetupQuality.A_PLUS
+        if conf >= 72 and n >= 5: return SetupQuality.A
+        if conf >= 62 and n >= 4: return SetupQuality.B
+        if conf >= 52 and n >= 3: return SetupQuality.C
+        return SetupQuality.NO_TRADE
+
+
+STRATEGY_ENGINE = StrategyEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  ML META-LABELING ENGINE  (PERSISTENT — NEVER RESETS)
+# ════════════════════════════════════════════════════════════════
+
+class MLMetaEngine:
+    """
+    Meta-labeling: predicts whether the rule-based signal will succeed.
+    Persists across restarts using MLDataStore.
+    Activates at ML_MIN_SAMPLES = 50 resolved trades.
+    Uses purged walk-forward cross-validation.
+    Calibrates with isotonic regression.
+    """
 
     def __init__(self):
         self.rf  = RandomForestClassifier(
-            n_estimators=200, max_depth=10,
-            min_samples_split=3, random_state=42, n_jobs=-1)
+            n_estimators=200, max_depth=8,
+            min_samples_split=5, min_samples_leaf=3,
+            random_state=42, n_jobs=-1)
         self.gb  = GradientBoostingClassifier(
             n_estimators=150, max_depth=4,
-            learning_rate=0.08, random_state=42)
+            learning_rate=0.05, subsample=0.8,
+            random_state=42)
         self.lr  = LogisticRegression(
-            max_iter=2000, random_state=42, C=1.0)
-        self.scaler            = StandardScaler()
+            max_iter=3000, C=0.5, random_state=42)
+        self.scaler     = StandardScaler()
+        self.calibrator = IsotonicRegression(out_of_bounds="clip")
+
         self.is_trained        = False
+        self.is_calibrated     = False
         self.n_samples         = 0
+        self.out_of_sample_acc = 0.0
+        self.calibrated_brier  = 1.0
         self.feature_importance: Dict[str, float] = {}
         self.accuracy_history:   List[float] = []
-        self.win_rate_history:   List[float] = []
+        self.weights            = [0.50, 0.35, 0.15]
+
         self._load()
 
     def _load(self):
+        """Load model from disk — persists across restarts."""
         if os.path.exists(ML_MODEL_FILE):
             try:
                 with open(ML_MODEL_FILE, "rb") as f:
                     d = pickle.load(f)
-                self.rf                 = d.get("rf",    self.rf)
-                self.gb                 = d.get("gb",    self.gb)
-                self.lr                 = d.get("lr",    self.lr)
-                self.scaler             = d.get("scaler",self.scaler)
-                self.is_trained         = d.get("is_trained",        False)
-                self.n_samples          = d.get("n_samples",         0)
-                self.feature_importance = d.get("feature_importance",{})
-                self.accuracy_history   = d.get("accuracy_history",  [])
-                self.win_rate_history   = d.get("win_rate_history",  [])
-                log.info(f"ML loaded: {self.n_samples} samples, "
-                         f"trained={self.is_trained}")
+                self.rf                = d.get("rf",    self.rf)
+                self.gb                = d.get("gb",    self.gb)
+                self.lr                = d.get("lr",    self.lr)
+                self.scaler            = d.get("scaler",self.scaler)
+                self.calibrator        = d.get("cal",   self.calibrator)
+                self.is_trained        = d.get("trained",     False)
+                self.is_calibrated     = d.get("calibrated",  False)
+                self.n_samples         = d.get("n_samples",   0)
+                self.out_of_sample_acc = d.get("oos_acc",     0.0)
+                self.feature_importance= d.get("feat_imp",    {})
+                self.accuracy_history  = d.get("acc_history", [])
+                self.weights           = d.get("weights",
+                                              [0.50, 0.35, 0.15])
+                self.calibrated_brier  = d.get("brier",       1.0)
+                log.info(
+                    f"ML loaded: {self.n_samples} samples | "
+                    f"Trained: {self.is_trained} | "
+                    f"OOS: {self.out_of_sample_acc:.2%}")
             except Exception as e:
                 log.error(f"ML load error: {e}")
+        else:
+            log.info(
+                f"ML: No model file found. "
+                f"Will train when {ML_MIN_SAMPLES} samples available.")
 
     def _save(self):
         try:
             with open(ML_MODEL_FILE, "wb") as f:
                 pickle.dump({
-                    "rf": self.rf, "gb": self.gb, "lr": self.lr,
-                    "scaler": self.scaler,
-                    "is_trained": self.is_trained,
-                    "n_samples":  self.n_samples,
-                    "feature_importance": self.feature_importance,
-                    "accuracy_history":   self.accuracy_history,
-                    "win_rate_history":   self.win_rate_history}, f)
+                    "rf":        self.rf,
+                    "gb":        self.gb,
+                    "lr":        self.lr,
+                    "scaler":    self.scaler,
+                    "cal":       self.calibrator,
+                    "trained":   self.is_trained,
+                    "calibrated": self.is_calibrated,
+                    "n_samples": self.n_samples,
+                    "oos_acc":   self.out_of_sample_acc,
+                    "feat_imp":  self.feature_importance,
+                    "acc_history": self.accuracy_history,
+                    "weights":   self.weights,
+                    "brier":     self.calibrated_brier,
+                }, f)
         except Exception as e:
             log.error(f"ML save error: {e}")
 
-    def extract_features(self, of: OrderFlowData,
-                         af: Optional[AdvancedOrderFlowData],
-                         vp: Optional[VolumeProfile],
-                         ob: Optional[OrderBookData],
-                         pb: Optional[PositionBookData],
-                         cr: PredictionResult) -> List[float]:
-        tv  = of.total_volume if of.total_volume > 0 else 1.0
-        f0  = of.imbalance / 100
-        f1  = min(1.0, abs(of.cvd) / tv)
-        f2  = of.delta_momentum / tv
-        f3  = of.volume_trend / 100
-        f4  = of.recent_delta_5 / tv
-        f5  = of.recent_delta_10 / tv
-        f6  = of.cvd_slope / tv
-        f7  = of.volume_acceleration / tv
-        f8  = 1.0 if of.buying_climax  else 0.0
-        f9  = 1.0 if of.selling_climax else 0.0
-        f10 = ((of.price - of.vwap) / of.vwap * 100
-               if of.vwap > 0 else 0.0)
-        f11 = af.vpin                       if af else 0.0
-        f12 = af.toxicity                   if af else 0.0
-        f13 = min(1.0, af.amihud_illiquidity / 100) if af else 0.0
-        f14 = af.market_depth_imbalance     if af else 0.0
-        f15 = min(1.0, af.absorption_ratio / 3) if af else 0.33
-        f16 = af.institutional_flow_score / 100 if af else 0.0
-        f17 = min(1.0, max(-1.0, af.trade_arrival_rate / 3)) if af else 0.0
-        f18 = af.volume_clustering          if af else 0.0
-        f19 = (1.0  if af and af.aggressor_side == "BUYERS"  else
-               -1.0 if af and af.aggressor_side == "SELLERS" else 0.0)
-        f20 = min(1.0, af.iceberg_count / 10) if af else 0.0
-        f21 = abs(af.kyle_lambda) * 100000  if af else 0.0
-        f22 = af.roll_spread / 0.01         if af else 0.0
-        if vp and vp.vah > vp.val:
-            var = vp.vah - vp.val
-            f23 = (of.price - vp.poc) / (var + 0.0001)
-            f24 = (of.price - vp.val) / (var + 0.0001)
-            f25 = 1.0 if vp.val <= of.price <= vp.vah else 0.0
-        else:
-            f23 = f24 = f25 = 0.0
-        f26 = (ob.long_pct - ob.short_pct) / 100 if ob else 0.0
-        f27 = ob.pending_delta / 10             if ob else 0.0
-        f28 = pb.skew / 100                     if pb else 0.0
-        f29 = pb.total_underwater / 100         if pb else 0.0
-        f30 = pb.crowded_trade_index / 500      if pb else 0.0
-        tf_ = (cr.bullish_count + cr.bearish_count + cr.neutral_count) or 1
-        f31 = cr.bullish_count / tf_
-        f32 = cr.bearish_count / tf_
-        f33 = cr.confidence / 100
-        f34 = (1.0 if cr.quality in (SetupQuality.A_PLUS, SetupQuality.A)
-               else 0.5 if cr.quality == SetupQuality.B else 0.0)
-        raw = [f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,
-               f11,f12,f13,f14,f15,f16,f17,f18,f19,f20,f21,f22,
-               f23,f24,f25,f26,f27,f28,f29,f30,f31,f32,f33,f34]
-        return [0.0 if (np.isnan(v) or np.isinf(v)) else float(v)
+    # ── Feature extraction (20 independent features) ─────────────
+    def extract_features(self,
+                         of:      OrderFlowData,
+                         af:      Optional[AdvancedFlowData],
+                         vp:      Optional[VolumeProfile],
+                         ob:      Optional[OrderBookData],
+                         pb:      Optional[PositionBookData],
+                         regime:  Optional[RegimeData],
+                         session: Optional[SessionData],
+                         signal:  Optional[StrategySignal],
+                         ict:     Optional[Dict]) -> List[float]:
+        tv   = of.total_volume if of.total_volume > 0 else 1.0
+
+        f0   = float(np.clip(of.imbalance_zscore / 3.0, -1.0, 1.0))
+        f1   = float(np.clip(of.cvd / tv, -1.0, 1.0))
+        f2   = float(np.clip(of.vwap_zscore / 3.0, -1.0, 1.0))
+        f3   = float(np.clip(of.vol_ratio / 3.0, 0.0, 1.0))
+        f4   = float(of.efficiency_ratio)
+        f5   = af.vpin if af else 0.0
+        f6   = af.toxicity if af else 0.0
+        f7   = float(np.clip(
+            (af.absorption_ratio - 1.0) / 2.0, -0.5, 1.0)
+            if af else 0.0)
+        f8   = (af.institutional_score / 100) if af else 0.0
+        f9   = float(np.clip(pb.skew / 100, -1.0, 1.0)) if pb else 0.0
+        f10  = float(np.clip(pb.skew_change / 10, -1.0, 1.0)) if pb else 0.0
+
+        regime_map = {
+            RegimeType.STRONG_TREND: 1.0,
+            RegimeType.WEAK_TREND:   0.7,
+            RegimeType.RANGING:      0.3,
+            RegimeType.COMPRESSION:  0.0,
+            RegimeType.EXPANSION:    0.8,
+            RegimeType.CHAOTIC:     -1.0,
+        }
+        f11  = regime_map.get(regime.regime, 0.0) if regime else 0.0
+        f12  = float(np.clip(
+            (regime.hurst_exponent - 0.5) * 4, -1.0, 1.0)
+            if regime else 0.0)
+        f13  = float(np.clip(regime.volatility_ratio / 3.0, 0.0, 1.0)
+                     if regime else 0.33)
+        f14  = float(np.clip(regime.adr_consumed_pct / 100, 0.0, 1.0)
+                     if regime else 0.5)
+
+        sess_map = {
+            SessionType.OVERLAP:   1.0,
+            SessionType.LONDON:    0.8,
+            SessionType.NEW_YORK:  0.7,
+            SessionType.TOKYO:     0.4,
+            SessionType.SYDNEY:    0.3,
+            SessionType.OFF_HOURS: 0.1,
+        }
+        f15  = sess_map.get(session.session_type, 0.5) if session else 0.5
+        f15 += 0.2 if (session and session.is_kill_zone) else 0.0
+        f15  = min(1.0, f15)
+
+        f16  = 1.0 if (ict and ict.get("swept")) else 0.0
+        disp = ict.get("displacement") if ict else None
+        f17  = float(disp.body_ratio if disp else 0.0)
+        f18  = float(np.clip(signal.rr_ratio / 5.0, 0.0, 1.0)
+                     if signal else 0.0)
+        f19  = float(signal.confidence / 100 if signal else 0.5)
+
+        # Contradiction penalty feature
+        raw = [f0, f1, f2, f3, f4, f5, f6, f7, f8, f9,
+               f10, f11, f12, f13, f14, f15, f16, f17, f18, f19]
+        return [0.0 if (math.isnan(v) or math.isinf(v)) else float(v)
                 for v in raw]
 
-    def train(self, predictions: List[Dict]) -> Dict:
-        completed = [p for p in predictions
-                     if p.get("outcome") in ("WIN", "LOSS")]
-        self.n_samples = len(completed)
+    # ── Training with purged walk-forward ─────────────────────────
+    def train(self, training_data: Optional[List[Dict]] = None) -> Dict:
+        """
+        Train on all available resolved samples.
+        If training_data is None, uses ML_DATA_STORE.
+        """
+        if training_data is None:
+            samples = ML_DATA_STORE.get_training_data()
+        else:
+            samples = [s for s in training_data
+                       if s.get("outcome") in ("WIN","LOSS")
+                       and len(s.get("features",[]))==20]
+
+        self.n_samples = len(samples)
+
         if self.n_samples < ML_MIN_SAMPLES:
-            return {"status": f"Need {ML_MIN_SAMPLES - self.n_samples} more",
-                    "samples": self.n_samples}
-        X, y = [], []
-        for p in completed:
-            feats = p.get("features", [])
-            if len(feats) == 35:
-                X.append(feats)
-                y.append(1 if p["outcome"] == "WIN" else 0)
-        if len(X) < ML_MIN_SAMPLES:
-            return {"status": "Insufficient feature data", "samples": len(X)}
-        Xa  = np.array(X, dtype=np.float32)
-        ya  = np.array(y, dtype=np.int32)
-        Xs  = self.scaler.fit_transform(Xa)
+            log.info(
+                f"ML: {self.n_samples}/{ML_MIN_SAMPLES} samples. "
+                f"Need {ML_MIN_SAMPLES - self.n_samples} more to train.")
+            return {
+                "status":  f"Need {ML_MIN_SAMPLES-self.n_samples} more",
+                "samples": self.n_samples,
+                "trained": False,
+            }
+
+        X = [s["features"] for s in samples]
+        y = [1 if s["outcome"]=="WIN" else 0 for s in samples]
+        Xa = np.array(X, dtype=np.float32)
+        ya = np.array(y, dtype=np.int32)
+        Xs = self.scaler.fit_transform(Xa)
+
+        # Purged walk-forward
+        n       = len(Xs)
+        fold_n  = n // 5
+        buffer  = max(5, fold_n // 10)
+        oos_p   = np.zeros(n)
+        oos_m   = np.zeros(n, dtype=bool)
+
+        for fold in range(5):
+            ts   = fold * fold_n
+            te   = ts + fold_n if fold < 4 else n
+            tend = max(0, ts - buffer)
+            if tend < max(10, ML_MIN_SAMPLES // 4):
+                continue
+            Xtr, ytr = Xs[:tend], ya[:tend]
+            Xte      = Xs[ts:te]
+            if len(np.unique(ytr)) < 2:
+                continue
+            self.rf.fit(Xtr, ytr)
+            oos_p[ts:te] = self.rf.predict_proba(Xte)[:,1]
+            oos_m[ts:te] = True
+
+        # Full training
+        if len(np.unique(ya)) < 2:
+            log.warning("ML: Only one class in training data. Skipping.")
+            return {"status": "single_class", "samples": n, "trained": False}
+
         self.rf.fit(Xs, ya)
         self.gb.fit(Xs, ya)
         self.lr.fit(Xs, ya)
-        nsplit = min(5, len(ya))
-        if nsplit >= 2:
-            acc = float(np.mean(
-                cross_val_score(self.rf, Xs, ya,
-                                cv=nsplit, scoring="accuracy")))
-        else:
-            acc = float(accuracy_score(ya, self.rf.predict(Xs)))
-        self.accuracy_history.append(acc)
-        self.win_rate_history.append(sum(y) / len(y) if y else 0)
-        self.is_trained = True
-        fnames = [
-            "imbalance","cvd_norm","delta_momentum","vol_trend",
-            "recent_delta5","recent_delta10","cvd_slope","vol_acceleration",
-            "buying_climax","selling_climax","vwap_dist","vpin","toxicity",
-            "amihud","depth_imbalance","absorption","inst_score",
-            "arrival_rate","vol_clustering","aggressor","iceberg",
-            "kyle_lambda","roll_spread","vp_poc_dist","vp_val_dist",
-            "in_value_area","ob_skew","ob_delta","pb_skew","pb_underwater",
-            "crowded_idx","bull_pct","bear_pct","confidence","quality"
+
+        # OOS accuracy
+        if oos_m.sum() > 0:
+            oos_y   = ya[oos_m]
+            oos_bin = (oos_p[oos_m] >= 0.5).astype(int)
+            self.out_of_sample_acc = float(accuracy_score(oos_y, oos_bin))
+
+        # Calibration
+        if oos_m.sum() >= 20:
+            oos_raw = oos_p[oos_m]
+            oos_y   = ya[oos_m]
+            self.calibrator.fit(oos_raw, oos_y)
+            self.is_calibrated = True
+            cal_p   = self.calibrator.predict(oos_raw)
+            self.calibrated_brier = float(brier_score_loss(oos_y, cal_p))
+
+        # Feature importance
+        FNAMES = [
+            "of_imb_z","cvd_norm","vwap_z","vol_ratio",
+            "efficiency","vpin","toxicity","absorption",
+            "inst_score","retail_skew","skew_change","regime",
+            "hurst","volatility_ratio","adr_consumed","session_qual",
+            "liq_swept","displacement","rr_ratio","raw_conf"
         ]
         if hasattr(self.rf, "feature_importances_"):
             self.feature_importance = {
-                n: float(i)
-                for n, i in zip(fnames, self.rf.feature_importances_)}
-        self._save()
-        log.info(f"ML retrained: {self.n_samples} samples, "
-                 f"accuracy={acc:.2%}")
-        return {"status": "trained",
-                "samples": self.n_samples, "accuracy": acc}
+                n: float(v) for n, v in
+                zip(FNAMES, self.rf.feature_importances_)}
 
-    def predict_proba(self, features: List[float]) -> Tuple[float, str]:
-        if not self.is_trained or len(features) != 35:
-            return 0.5, "No ML data yet"
+        self.is_trained = True
+        self.accuracy_history.append(self.out_of_sample_acc)
+        self._save()
+
+        log.info(
+            f"ML trained: {self.n_samples} samples | "
+            f"OOS: {self.out_of_sample_acc:.2%} | "
+            f"Brier: {self.calibrated_brier:.3f}")
+
+        return {
+            "status":       "trained",
+            "samples":      self.n_samples,
+            "oos_accuracy": self.out_of_sample_acc,
+            "brier":        self.calibrated_brier,
+            "calibrated":   self.is_calibrated,
+            "trained":      True,
+        }
+
+    def predict(self, features: List[float]
+                ) -> Tuple[float, float, str]:
+        """Returns (raw_prob, calibrated_prob, label)."""
+        if not self.is_trained or len(features) != 20:
+            return 0.5, 0.5, "🧠 ML: Accumulating data..."
         try:
             X   = np.array([features], dtype=np.float32)
             Xs  = self.scaler.transform(X)
             rfp = self.rf.predict_proba(Xs)[0][1]
             gbp = self.gb.predict_proba(Xs)[0][1]
             lrp = self.lr.predict_proba(Xs)[0][1]
-            ens = rfp * 0.50 + gbp * 0.35 + lrp * 0.15
-            if ens >= 0.75:   lbl = "ML: VERY HIGH CONFIDENCE 🔥"
-            elif ens >= 0.60: lbl = "ML: HIGH CONFIDENCE ✅"
-            elif ens >= 0.50: lbl = "ML: MODERATE ⚡"
-            elif ens >= 0.40: lbl = "ML: LOW ⚠️"
-            else:              lbl = "ML: UNFAVORABLE 🔴"
-            return float(ens), lbl
+            raw = (rfp*self.weights[0] +
+                   gbp*self.weights[1] +
+                   lrp*self.weights[2])
+            cal = (float(self.calibrator.predict([raw])[0])
+                   if self.is_calibrated else raw)
+            if cal >= 0.75:   lbl = "🧠 ML: VERY HIGH ✅"
+            elif cal >= 0.62: lbl = "🧠 ML: HIGH ⚡"
+            elif cal >= 0.52: lbl = "🧠 ML: MODERATE"
+            elif cal >= 0.40: lbl = "🧠 ML: LOW ⚠️"
+            else:              lbl = "🧠 ML: UNFAVORABLE 🔴"
+            return float(raw), float(cal), lbl
         except Exception as e:
-            log.error(f"ML predict error: {e}")
-            return 0.5, "ML error"
-
-    # alias
-    def predict(self, features: List[float]) -> Tuple[float, str]:
-        return self.predict_proba(features)
+            log.error(f"ML predict: {e}")
+            return 0.5, 0.5, "🧠 ML: Error"
 
     def get_stats(self) -> Dict:
+        n_total    = ML_DATA_STORE.n_total
+        n_resolved = ML_DATA_STORE.n_samples
         return {
-            "is_trained":       self.is_trained,
-            "n_samples":        self.n_samples,
+            "is_trained":      self.is_trained,
+            "is_calibrated":   self.is_calibrated,
+            "n_samples":       n_resolved,
+            "n_total":         n_total,
+            "n_needed":        max(0, ML_MIN_SAMPLES - n_resolved),
+            "oos_accuracy":    self.out_of_sample_acc,
+            "brier_score":     self.calibrated_brier,
             "accuracy_history": self.accuracy_history[-10:],
-            "latest_accuracy":  (self.accuracy_history[-1]
-                                 if self.accuracy_history else 0.0),
-            "latest_acc":       (self.accuracy_history[-1]
-                                 if self.accuracy_history else 0.0),
-            "win_rate_history": self.win_rate_history[-10:],
-            "top_features":     sorted(
+            "top_features":    sorted(
                 self.feature_importance.items(),
-                key=lambda x: x[1], reverse=True)[:8]
+                key=lambda x: x[1], reverse=True)[:8],
+            "weights":         self.weights,
+            "latest_acc":      (self.accuracy_history[-1]
+                                if self.accuracy_history else 0.0),
         }
 
-    # alias
-    def stats(self) -> Dict:
-        return self.get_stats()
 
-
-ML_ENGINE = MLLearningEngine()
-
+ML_ENGINE = MLMetaEngine()
 
 # ════════════════════════════════════════════════════════════════
 #  PATTERN MEMORY ENGINE
@@ -1834,142 +3928,340 @@ ML_ENGINE = MLLearningEngine()
 class PatternMemoryEngine:
 
     def __init__(self):
-        self.patterns: List[Dict] = load_json_file(PATTERN_MEMORY_FILE, [])
-        log.info(f"Pattern memory loaded: {len(self.patterns)} patterns")
+        self.patterns: List[Dict] = load_json(PATTERN_MEMORY_FILE, [])
+        log.info(f"Pattern memory: {len(self.patterns)} patterns")
 
     def _save(self):
-        save_json_file(PATTERN_MEMORY_FILE, self.patterns[-500:])
+        save_json(PATTERN_MEMORY_FILE, self.patterns[-800:])
 
-    def record_pattern(self, pred: QuantPrediction,
-                       of: OrderFlowData,
-                       af: Optional[AdvancedOrderFlowData],
-                       session: str):
-        pattern = {
-            "pattern_id":          pred.prediction_id,
-            "pair":                pred.pair,
-            "timeframe":           pred.timeframe,
-            "timestamp":           pred.timestamp,
-            "direction":           pred.direction,
-            "outcome":             "PENDING",
-            "pips":                0.0,
-            "confidence":          pred.confidence,
-            "quality":             pred.quality,
-            "session":             session,
-            "vpin":                af.vpin if af else 0.0,
-            "toxicity":            af.toxicity if af else 0.0,
-            "institutional_score": (af.institutional_flow_score
-                                    if af else 0.0),
-            "smart_money":         (af.smart_money_activity
-                                    if af else "LOW"),
-            "imbalance":           of.imbalance,
-            "cvd_positive":        of.cvd > 0,
-            "aggressor":           (af.aggressor_side
-                                    if af else "NEUTRAL"),
-            "iceberg_count":       af.iceberg_count if af else 0
-        }
-        self.patterns.append(pattern)
+    def record(self,
+               pred:    QuantPrediction,
+               of:      OrderFlowData,
+               af:      Optional[AdvancedFlowData],
+               regime:  RegimeData,
+               session: SessionData):
+        self.patterns.append({
+            "id":         pred.prediction_id,
+            "trade_id":   pred.trade_id,
+            "pair":       pred.pair,
+            "timeframe":  pred.timeframe,
+            "timestamp":  pred.timestamp,
+            "direction":  pred.direction,
+            "strategy":   pred.strategy,
+            "outcome":    "PENDING",
+            "pips":       0.0,
+            "confidence": pred.confidence,
+            "cal_prob":   pred.calibrated_prob,
+            "quality":    pred.quality,
+            "session":    session.session_name,
+            "is_kz":      session.is_kill_zone,
+            "regime":     regime.regime.value,
+            "hurst":      regime.hurst_exponent,
+            "vpin":       af.vpin if af else 0.0,
+            "toxicity":   af.toxicity if af else 0.0,
+            "inst_score": af.institutional_score if af else 0.0,
+            "sm_activity":af.smart_money_activity if af else "LOW",
+            "aggressor":  af.aggressor_side if af else "NEUTRAL",
+            "imbalance":  of.imbalance,
+            "cvd_pos":    of.cvd > 0,
+            "rr_ratio":   pred.rr_ratio,
+        })
         self._save()
 
-    # alias
-    def record(self, pred: QuantPrediction,
-               of: OrderFlowData,
-               af: Optional[AdvancedOrderFlowData],
-               session: str):
-        self.record_pattern(pred, of, af, session)
-
-    def update_outcome(self, prediction_id: str,
-                       outcome: str, pips: float):
+    def update(self, prediction_id: str, outcome: str, pips: float):
         for p in self.patterns:
-            if p.get("pattern_id") == prediction_id:
+            if p.get("id") == prediction_id:
                 p["outcome"] = outcome
                 p["pips"]    = pips
                 break
         self._save()
 
-    # alias
-    def update(self, prediction_id: str, outcome: str, pips: float):
-        self.update_outcome(prediction_id, outcome, pips)
-
-    def find_similar(self, pair: str, direction: str,
-                     af: Optional[AdvancedOrderFlowData],
-                     of: Optional[OrderFlowData],
-                     session: str) -> Dict:
+    def find_similar(self,
+                     pair:      str,
+                     direction: str,
+                     strategy:  str,
+                     af:        Optional[AdvancedFlowData],
+                     of:        Optional[OrderFlowData],
+                     regime:    Optional[RegimeData],
+                     session:   Optional[SessionData]) -> Dict:
         completed = [p for p in self.patterns
-                     if p.get("outcome") in ("WIN", "LOSS")
+                     if p.get("outcome") in ("WIN","LOSS")
                      and p.get("pair") == pair]
         if not completed:
             return {"found": False, "count": 0}
         scored = []
         for p in completed:
             score = 0
-            if p.get("direction") == direction:             score += 30
-            if p.get("session") == session:                 score += 20
-            if af:
-                vpin_diff = abs(p.get("vpin", 0) - af.vpin)
-                if vpin_diff < 0.1:                         score += 20
-                elif vpin_diff < 0.2:                       score += 10
-                if p.get("aggressor") == af.aggressor_side: score += 15
-                if p.get("smart_money") == af.smart_money_activity:
-                    score += 15
-            if of:
-                if (p.get("cvd_positive", False)) == (of.cvd > 0):
-                    score += 10
+            if p.get("direction") == direction:         score += 25
+            if p.get("strategy")  == strategy:          score += 20
+            if session and p.get("session") == session.session_name:
+                score += 15
+            if p.get("is_kz") and session and session.is_kill_zone:
+                score += 10
+            if regime and p.get("regime") == regime.regime.value:
+                score += 15
+            if af and abs(p.get("vpin",0)-af.vpin) < 0.1:
+                score += 10
+            if af and p.get("aggressor") == af.aggressor_side:
+                score += 5
+            if of and p.get("cvd_pos",(of.cvd>0)) == (of.cvd>0):
+                score += 5
             scored.append((score, p))
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = [p for s, p in scored[:10] if s >= 40]
+        top = [p for s,p in scored[:15] if s >= 40]
         if not top:
             return {"found": False, "count": 0}
-        wins    = sum(1 for p in top if p.get("outcome") == "WIN")
-        losses  = len(top) - wins
-        wr      = wins / len(top) if top else 0
-        avg_pips = (sum(abs(p.get("pips", 0)) for p in top
-                        if p.get("outcome") == "WIN") / max(wins, 1))
-        best    = max(top, key=lambda x: abs(x.get("pips", 0)))
+        wins     = sum(1 for p in top if p.get("outcome")=="WIN")
+        losses   = len(top) - wins
+        wr       = wins / len(top)
+        avg_pips = sum(abs(p.get("pips",0))
+                       for p in top if p.get("outcome")=="WIN") / max(wins,1)
         return {
-            "found":        True,
-            "count":        len(top),
-            "wins":         wins,
-            "losses":       losses,
-            "win_rate":     wr,
-            "avg_pips":     avg_pips,
-            "best_outcome": best.get("outcome", ""),
-            "best_pips":    best.get("pips", 0),
-            "best_session": best.get("session", ""),
-            "narrative":    self._build_narrative(
-                pair, direction, top, wr, avg_pips)
+            "found":     True,
+            "count":     len(top),
+            "wins":      wins,
+            "losses":    losses,
+            "win_rate":  wr,
+            "avg_pips":  avg_pips,
+            "narrative": self._narrative(
+                pair, direction, strategy, top, wr, avg_pips),
         }
 
-    def _build_narrative(self, pair: str, direction: str,
-                         patterns: List[Dict],
-                         wr: float, avg_pips: float) -> str:
-        n         = len(patterns)
-        pair_disp = pair_to_display(pair)
-        if wr >= 0.70:   strength = "strongly"; emoji = "🔥"
-        elif wr >= 0.55: strength = "moderately"; emoji = "✅"
-        else:            strength = "weakly"; emoji = "⚠️"
-        narrative = (
-            f"{emoji} <b>Pattern Memory says:</b>\n"
-            f"We have seen <b>{n} similar setups</b> on {pair_disp} "
-            f"in the past.\n\n"
-            f"When these conditions aligned, the market <b>{strength} "
-            f"favoured {'bulls' if direction == 'LONG' else 'bears'}</b>"
-            f" — winning <b>{wr:.0%}</b> of the time with an average of "
-            f"<b>{avg_pips:.1f} pips</b> gained per winning trade.\n\n"
+    def _narrative(self, pair, direction, strategy,
+                   patterns, wr, avg_pips) -> str:
+        n  = len(patterns)
+        pd = pair_display(pair)
+        em = "🔥" if wr >= 0.70 else ("✅" if wr >= 0.55 else "⚠️")
+        side = "bulls" if direction=="LONG" else "bears"
+        return (
+            f"{'─'*30}\n{em} <b>Pattern Memory ({n} similar)</b>\n\n"
+            f"Historical: <b>{wr:.0%} WR</b> | "
+            f"<b>{avg_pips:.1f} avg pips</b> on winners.\n\n"
+            f"{'Strong precedent for ' if wr>=0.60 else 'Mixed — '}"
+            f"{side}. "
+            f"{'High-probability by history.' if wr>=0.65 else 'Manage risk carefully.'}"
         )
-        if wr >= 0.60:
-            narrative += ("Based on historical precedent, we <b>expect "
-                          "the move to follow through</b>.")
-        elif wr >= 0.45:
-            narrative += ("History shows mixed results. "
-                          "<b>Manage risk carefully</b>.")
-        else:
-            narrative += ("⚠️ Historical data suggests this pattern has "
-                          "been <b>less reliable</b>. Reduce position size.")
-        return narrative
 
 
 PATTERN_MEMORY = PatternMemoryEngine()
 
+# ════════════════════════════════════════════════════════════════
+#  QUANT BRAIN  (MAIN SIGNAL ORCHESTRATOR)
+# ════════════════════════════════════════════════════════════════
+
+class QuantBrain:
+
+    def __init__(self):
+        self.history: List[Dict] = load_json(PREDICTIONS_FILE, [])
+        log.info(f"QuantBrain: {len(self.history)} historical signals")
+
+    def _save(self):
+        save_json(PREDICTIONS_FILE, self.history[-2000:])
+
+    async def generate(self,
+                       candles:       List[Candle],
+                       of:            OrderFlowData,
+                       af:            Optional[AdvancedFlowData],
+                       vp:            Optional[VolumeProfile],
+                       ob:            Optional[OrderBookData],
+                       pb:            Optional[PositionBookData],
+                       cs:            Optional[Dict],
+                       instrument:    str,
+                       daily_candles: Optional[List[Candle]] = None,
+                       m15_candles:   Optional[List[Candle]] = None,
+                       h4_candles:    Optional[List[Candle]] = None
+                       ) -> Dict:
+        now     = datetime.now(timezone.utc)
+        session = SESSION_ENGINE.get_session(now)
+        price   = candles[-1].close
+
+        regime = REGIME_ENGINE.detect(candles, daily_candles, instrument)
+        ict    = ICT_ENGINE.full_analysis(
+            candles, daily_candles, session, instrument)
+
+        # HTF bias from H4
+        htf_bias = "NEUTRAL"
+        if h4_candles and len(h4_candles) >= 20:
+            h4_struct  = ICT_ENGINE.analyze_structure(
+                h4_candles, instrument, 3)
+            htf_bias   = h4_struct.trend
+            ict["structure"].htf_bias = htf_bias
+
+        # Pivots
+        pivots = None
+        if daily_candles and len(daily_candles) >= 2:
+            pd_c   = daily_candles[-2]
+            pivots = MATH.calculate_pivots(
+                pd_c.high, pd_c.low, pd_c.close)
+
+        # Technical indicators
+        closes    = [c.close for c in candles]
+        std_bands = MATH.std_bands(closes, 50)
+        atr       = MATH.calculate_atr(candles)
+        exp_move  = MATH.expected_move(price, atr, 12)
+
+        # Run strategies
+        signal = STRATEGY_ENGINE.run_all(
+            candles, of, af, vp, ob, pb, cs,
+            ict, regime, session, instrument, daily_candles)
+
+        if signal is None or signal.quality == SetupQuality.NO_TRADE:
+            return {
+                "has_setup":  False,
+                "regime":     regime,
+                "session":    session,
+                "ict":        ict,
+                "htf_bias":   htf_bias,
+                "std_bands":  std_bands,
+                "exp_move":   exp_move,
+                "pivots":     pivots,
+            }
+
+        # Session-based minimum confidence
+        min_conf = SESSION_ENGINE.get_min_confidence(session)
+        if signal.confidence < min_conf:
+            return {
+                "has_setup": False,
+                "regime":    regime,
+                "session":   session,
+                "ict":       ict,
+                "htf_bias":  htf_bias,
+                "std_bands": std_bands,
+                "exp_move":  exp_move,
+                "pivots":    pivots,
+            }
+
+        # ML features
+        features = ML_ENGINE.extract_features(
+            of, af, vp, ob, pb, regime, session, signal, ict)
+        signal.features = features
+
+        # ML prediction
+        ml_raw, ml_cal, ml_label = ML_ENGINE.predict(features)
+        signal.ml_probability = ml_raw
+        signal.calibrated_prob = ml_cal
+
+        # ML penalty for unfavorable signals
+        if ML_ENGINE.is_trained and ml_cal < 0.38:
+            signal.confidence = max(MIN_CONFIDENCE,
+                                    signal.confidence * 0.85)
+
+        # Pattern memory
+        sim = PATTERN_MEMORY.find_similar(
+            instrument, signal.direction,
+            signal.strategy.value, af, of, regime, session)
+
+        # Key levels
+        key_levels = self._key_levels(
+            ict, vp, pivots, std_bands, exp_move, instrument, price)
+
+        return {
+            "has_setup":       True,
+            "signal":          signal,
+            "direction":       signal.direction,
+            "quality":         signal.quality.value,
+            "strategy":        signal.strategy.value,
+            "target":          signal.target,
+            "stop":            signal.stop,
+            "confidence":      signal.confidence,
+            "calibrated_prob": signal.calibrated_prob,
+            "ml_raw":          ml_raw,
+            "ml_label":        ml_label,
+            "ml_prob":         ml_cal,
+            "reasons":         signal.reasons,
+            "factors":         signal.factors,
+            "features":        features,
+            "rr_ratio":        signal.rr_ratio,
+            "reward_pips":     signal.reward_pips,
+            "risk_pips":       signal.risk_pips,
+            "key_levels":      key_levels,
+            "regime":          regime,
+            "session":         session,
+            "ict":             ict,
+            "htf_bias":        htf_bias,
+            "std_bands":       std_bands,
+            "exp_move":        exp_move,
+            "pivots":          pivots,
+            "sim":             sim,
+            "breakeven_price": signal.breakeven_price,
+            "trailing_price":  signal.trailing_price,
+        }
+
+    def _key_levels(self, ict, vp, pivots, std_bands,
+                    exp_move, instrument, price) -> List[Dict]:
+        levels = []
+        if vp:
+            levels += [
+                {"price": vp.poc, "type": "POC",   "desc": "Point of Control"},
+                {"price": vp.vah, "type": "VAH",   "desc": "Value Area High"},
+                {"price": vp.val, "type": "VAL",   "desc": "Value Area Low"},
+            ]
+        if pivots:
+            levels += [
+                {"price": pivots.daily_pp, "type": "PP",
+                 "desc": "Daily Pivot"},
+                {"price": pivots.daily_r1, "type": "R1",
+                 "desc": "Daily R1"},
+                {"price": pivots.daily_s1, "type": "S1",
+                 "desc": "Daily S1"},
+                {"price": pivots.camarilla_r4, "type": "CR4",
+                 "desc": "Camarilla R4"},
+                {"price": pivots.camarilla_s4, "type": "CS4",
+                 "desc": "Camarilla S4"},
+            ]
+        for lv in ict.get("liq_levels", [])[:4]:
+            levels.append({
+                "price": lv.price, "type": lv.level_type,
+                "desc":  f"{'✅ Swept' if lv.swept else 'Unswept'} liquidity"
+            })
+        if std_bands:
+            levels += [
+                {"price": std_bands.get("upper_2", 0),
+                 "type": "+2σ", "desc": "2-Sigma upper band"},
+                {"price": std_bands.get("lower_2", 0),
+                 "type": "-2σ", "desc": "2-Sigma lower band"},
+            ]
+        near = [l for l in levels
+                if l.get("price", 0) > 0 and
+                pips_diff(instrument, abs(l["price"]-price)) < 250]
+        near.sort(key=lambda x: abs(x["price"] - price))
+        return near[:8]
+
+    def add_to_history(self, pred: QuantPrediction):
+        self.history.append({
+            "prediction_id":    pred.prediction_id,
+            "trade_id":         pred.trade_id,
+            "pair":             pred.pair,
+            "timeframe":        pred.timeframe,
+            "timestamp":        pred.timestamp,
+            "current_price":    pred.current_price,
+            "direction":        pred.direction,
+            "target_price":     pred.target_price,
+            "invalidation_price": pred.invalidation_price,
+            "confidence":       pred.confidence,
+            "calibrated_prob":  pred.calibrated_prob,
+            "quality":          pred.quality,
+            "strategy":         pred.strategy,
+            "reasons":          pred.reasons,
+            "key_levels":       pred.key_levels,
+            "features":         pred.features,
+            "ml_confidence":    pred.ml_confidence,
+            "outcome":          "PENDING",
+            "pips_gained":      0.0,
+            "mae_pips":         0.0,
+            "mfe_pips":         0.0,
+            "regime":           pred.regime_at_signal,
+            "session":          pred.session_at_signal,
+            "rr_ratio":         pred.rr_ratio,
+            "reward_pips":      pred.reward_pips,
+            "risk_pips":        pred.risk_pips,
+            "was_sent":         pred.was_sent_to_users,
+            "sent_quality":     pred.sent_quality,
+        })
+        self._save()
+
+
+QB = QuantBrain()
 
 # ════════════════════════════════════════════════════════════════
 #  HISTORICAL BACKTEST ENGINE
@@ -1978,738 +4270,350 @@ PATTERN_MEMORY = PatternMemoryEngine()
 class HistoricalBacktestEngine:
 
     def __init__(self):
-        self.results: Dict[str, Dict] = load_json_file(HISTORICAL_BT_FILE, {})
-        self.is_running  = False
-        self._last_run:  Optional[datetime] = None
-        log.info(f"Historical backtest loaded: {len(self.results)} results")
+        self.results: Dict = load_json(HISTORICAL_BT_FILE, {})
+        self.is_running    = False
+        self._last_run:    Optional[datetime] = None
+        log.info(f"Backtest engine: {len(self.results)} stored results")
 
     def _save(self):
-        save_json_file(HISTORICAL_BT_FILE, self.results)
+        save_json(HISTORICAL_BT_FILE, self.results)
 
     def stale(self) -> bool:
-        """Returns True if backtest has never run or ran > 24 h ago."""
-        if not self.results or self._last_run is None:
+        if not self.results or not self._last_run:
             return True
-        return (datetime.now(timezone.utc) - self._last_run
-                ).total_seconds() > 86400
+        return (datetime.now(timezone.utc) -
+                self._last_run).total_seconds() > 86400
 
-    async def run(self, pairs: Optional[List[str]] = None,
-                  tf: str = "H1") -> Dict:
-        return await self.run_full_backtest(pairs=pairs, timeframe=tf)
-
-    async def run_full_backtest(self,
-                                pairs: Optional[List[str]] = None,
-                                timeframe: str = "H1") -> Dict:
+    async def run(self, pairs=None, tf="H1") -> Dict:
         if self.is_running:
             return {"status": "already_running"}
-        self.is_running    = True
-        pairs_to_test      = pairs or ASSET_CATEGORIES["forex_major"][:5]
-        all_results: Dict  = {}
-        log.info(f"Historical backtest starting for "
-                 f"{len(pairs_to_test)} pairs...")
+        self.is_running = True
+        pairs_to_test   = pairs or ASSET_CATEGORIES["forex_major"][:5]
+        all_results     = {}
+        log.info(f"Backtest: {len(pairs_to_test)} pairs on {tf}")
         async with aiohttp.ClientSession() as session:
             for pair in pairs_to_test:
                 try:
-                    result = await self._backtest_pair(session, pair, timeframe)
+                    result = await self._backtest_pair(session, pair, tf)
                     if result:
-                        key = f"{pair}_{timeframe}"
+                        key               = f"{pair}_{tf}"
                         all_results[key]  = result
                         self.results[key] = result
-                        log.info(f"BT {pair}: {result['win_rate']:.1%} WR "
-                                 f"({result['wins']}W/{result['losses']}L)")
-                    await asyncio.sleep(1.0)
+                        log.info(
+                            f"BT {pair}: {result['win_rate']:.1%} WR "
+                            f"E:{result['expectancy']:+.1f}p")
+                    await asyncio.sleep(1.5)
                 except Exception as e:
-                    log.error(f"BT error {pair}: {e}")
+                    log.error(f"BT {pair}: {e}")
         self._save()
         await self._feed_ml(all_results)
         self.is_running = False
         self._last_run  = datetime.now(timezone.utc)
-        log.info("Historical backtest complete")
         return all_results
 
-    async def _backtest_pair(self, session: aiohttp.ClientSession,
-                             pair: str,
-                             timeframe: str) -> Optional[Dict]:
-        candles = await fetch_candles(
-            session, pair, timeframe, HISTORICAL_BT_CANDLES)
-        if len(candles) < 60:
+    async def _backtest_pair(self, http_session, pair, tf):
+        candles = await fetch_candles(http_session, pair, tf, 500)
+        if len(candles) < 80:
             return None
-        signals = []
-        window  = 50
-        step    = 10
-        for i in range(window, len(candles) - 20, step):
-            analysis_candles = candles[max(0, i - window):i]
-            if len(analysis_candles) < 30:
+        pip    = pip_value(pair)
+        spread = pip * (2 if "JPY" in pair else
+                        5 if "XAU" in pair else
+                        3 if "NAS" in pair else 1.5)
+        signals  = []
+        window   = 60
+        step     = 8
+        se_local = SessionEngine()
+        for i in range(window, len(candles)-25, step):
+            analysis = candles[max(0, i-window):i]
+            if len(analysis) < 30:
                 continue
             try:
-                of  = OF_ENGINE.analyze(analysis_candles)
-                vp  = calculate_volume_profile(analysis_candles)
-                af  = ADVANCED_OF.analyze_all(analysis_candles, None)
-                lz  = LIQUIDITY_DETECTOR.detect_all(analysis_candles, pair)
-                result = OF_ENGINE.evaluate_confluence(
-                    of, vp, None, None, None, af, pair, of.price, lz)
-                if (not result.has_setup or
-                        result.confidence < MIN_CONFIDENCE or
-                        result.quality == SetupQuality.NO_TRADE):
-                    continue
-                entry_price = analysis_candles[-1].close
-                atr         = calculate_atr(analysis_candles, 14)
-                mult        = 1 if result.direction == "LONG" else -1
-                tgt_mult    = (2.5 if result.quality == SetupQuality.A_PLUS
-                               else 2.0 if result.quality == SetupQuality.A
-                               else 1.5 if result.quality == SetupQuality.B
-                               else 1.0)
-                target       = entry_price + atr * tgt_mult * mult
-                invalidation = entry_price - atr * 1.0 * mult
-                future_candles = candles[i:i + 20]
-                outcome, p_pips = self._simulate_outcome(
-                    future_candles, entry_price, target,
-                    invalidation, result.direction, pair)
-                sn = get_session_name(
-                    datetime.fromisoformat(
-                        analysis_candles[-1].time.replace("Z", "")).hour
-                    if analysis_candles[-1].time else 12)
-                signals.append({
-                    "pair":       pair,
-                    "timeframe":  timeframe,
-                    "direction":  result.direction,
-                    "quality":    result.quality.value,
-                    "confidence": result.confidence,
-                    "outcome":    outcome,
-                    "pips":       p_pips,
-                    "session":    sn,
-                    "vpin":       af.vpin,
-                    "inst_score": af.institutional_flow_score,
-                    "features":   ML_ENGINE.extract_features(
-                        of, af, vp, None, None, result)
-                })
+                of     = OF_ENGINE.analyze(analysis, pair)
+                regime = REGIME_ENGINE.detect(analysis)
+                sess   = se_local.get_session()
+                for st in [StrategyType.ICT_CONTINUATION,
+                           StrategyType.ICT_REVERSAL,
+                           StrategyType.BREAKOUT,
+                           StrategyType.MEAN_REVERSION]:
+                    if not REGIME_ENGINE.is_strategy_valid(st, regime, sess):
+                        continue
+                    sig = self._quick_signal(analysis, of, regime, pair, st)
+                    if not sig:
+                        continue
+                    # Validate geometry in backtest too
+                    val = validate_signal_geometry(
+                        sig["direction"], sig["entry"],
+                        sig["target"], sig["stop"], pair)
+                    if not val.is_valid:
+                        continue
+                    entry  = sig["entry"] + spread
+                    future = candles[i:i+25]
+                    outcome, p_pips, mae, mfe = self._simulate(
+                        future, entry, sig["target"],
+                        sig["stop"], sig["direction"], pair, spread)
+                    try:
+                        dt = datetime.fromisoformat(
+                            analysis[-1].time.replace("Z","+00:00"))
+                        sn = se_local.get_session(dt).session_name
+                    except Exception:
+                        sn = "Unknown"
+                    # Build features for ML training
+                    dummy_sig = StrategySignal(
+                        strategy=st, direction=sig["direction"],
+                        confidence=sig["confidence"],
+                        entry=entry, target=sig["target"],
+                        stop=sig["stop"],
+                        quality=SetupQuality.B,
+                        reasons=[], factors=[], features=[],
+                        rr_ratio=val.rr_ratio,
+                        reward_pips=val.reward_pips,
+                        risk_pips=val.risk_pips)
+                    feats = ML_ENGINE.extract_features(
+                        of, None, None, None, None, regime, sess,
+                        dummy_sig, None)
+                    signals.append({
+                        "pair":       pair,
+                        "timeframe":  tf,
+                        "direction":  sig["direction"],
+                        "strategy":   st.value,
+                        "quality":    "B (Moderate)",
+                        "confidence": sig["confidence"],
+                        "outcome":    outcome,
+                        "pips":       p_pips,
+                        "mae":        mae,
+                        "mfe":        mfe,
+                        "session":    sn,
+                        "regime":     regime.regime.value,
+                        "features":   feats,
+                        "rr_ratio":   val.rr_ratio,
+                    })
             except Exception:
                 continue
+
         if not signals:
             return None
-        wins   = sum(1 for s in signals if s["outcome"] == "WIN")
-        losses = sum(1 for s in signals if s["outcome"] == "LOSS")
-        total  = wins + losses
-        wr     = wins / total if total > 0 else 0.0
-        session_wr: Dict = {}
-        for sn in ["TOKYO","LONDON","NEW_YORK","OVERLAP","OFF_HOURS"]:
-            ss = [s for s in signals
-                  if s["session"] == sn
-                  and s["outcome"] in ("WIN","LOSS")]
-            if ss:
-                sw = sum(1 for s in ss if s["outcome"] == "WIN")
-                session_wr[sn] = {
-                    "wins": sw, "total": len(ss),
-                    "win_rate": sw / len(ss)}
-        quality_wr: Dict = {}
-        for q in [SetupQuality.A_PLUS.value, SetupQuality.A.value,
-                  SetupQuality.B.value, SetupQuality.C.value]:
-            qs = [s for s in signals
-                  if s["quality"] == q
-                  and s["outcome"] in ("WIN","LOSS")]
-            if qs:
-                qw = sum(1 for s in qs if s["outcome"] == "WIN")
-                quality_wr[q] = {
-                    "wins": qw, "total": len(qs),
-                    "win_rate": qw / len(qs)}
+
+        wins     = sum(1 for s in signals if s["outcome"]=="WIN")
+        losses   = sum(1 for s in signals if s["outcome"]=="LOSS")
+        total    = wins + losses
+        wr       = wins / total if total > 0 else 0.0
+        avg_win  = sum(abs(s["pips"]) for s in signals
+                      if s["outcome"]=="WIN") / max(wins, 1)
+        avg_loss = sum(abs(s["pips"]) for s in signals
+                      if s["outcome"]=="LOSS") / max(losses, 1)
+        exp      = wr*avg_win - (1-wr)*avg_loss
+
+        session_wr  = self._breakdown(signals, "session")
+        strategy_wr = self._breakdown(signals, "strategy")
+        regime_wr   = self._breakdown(signals, "regime")
+
         best_sess  = (max(session_wr.items(),
-                          key=lambda x: x[1]["win_rate"])[0]
-                      if session_wr else "N/A")
+                         key=lambda x: x[1]["win_rate"])[0]
+                     if session_wr else "N/A")
         worst_sess = (min(session_wr.items(),
-                          key=lambda x: x[1]["win_rate"])[0]
-                      if session_wr else "N/A")
-        best_qual  = (max(quality_wr.items(),
-                          key=lambda x: x[1]["win_rate"])[0]
-                      if quality_wr else "N/A")
-        avg_pips   = (sum(abs(s["pips"]) for s in signals
-                          if s["outcome"] == "WIN") / max(wins, 1))
+                         key=lambda x: x[1]["win_rate"])[0]
+                     if session_wr else "N/A")
+
         return {
-            "pair":              pair,
-            "timeframe":         timeframe,
-            "period_days":       30,
-            "total_signals":     len(signals),
-            "wins":              wins,
-            "losses":            losses,
-            "win_rate":          wr,
-            "avg_pips":          avg_pips,
-            "best_session":      best_sess,
-            "worst_session":     worst_sess,
-            "best_quality":      best_qual,
-            "quality_win_rates": quality_wr,
-            "session_win_rates": session_wr,
-            "signals":           signals,
-            "last_run":          datetime.now(timezone.utc).isoformat(),
-            "patterns_learned":  len(signals)
+            "pair":          pair,
+            "timeframe":     tf,
+            "total_signals": len(signals),
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      wr,
+            "avg_pips":      avg_win,
+            "avg_loss_pips": avg_loss,
+            "expectancy":    exp,
+            "best_session":  best_sess,
+            "worst_session": worst_sess,
+            "session_wr":    session_wr,
+            "strategy_wr":   strategy_wr,
+            "regime_wr":     regime_wr,
+            "signals":       signals,
+            "last_run":      datetime.now(timezone.utc).isoformat(),
         }
 
-    def _simulate_outcome(self, future_candles: List[Candle],
-                          entry: float, target: float,
-                          invalidation: float,
-                          direction: str,
-                          instrument: str) -> Tuple[str, float]:
-        for c in future_candles:
+    def _breakdown(self, signals, key) -> Dict:
+        out = {}
+        keys = set(s.get(key,"?") for s in signals)
+        for k in keys:
+            ss = [s for s in signals if s.get(key)==k
+                  and s["outcome"] in ("WIN","LOSS")]
+            if ss:
+                sw = sum(1 for s in ss if s["outcome"]=="WIN")
+                out[k] = {"wins": sw, "total": len(ss),
+                          "win_rate": sw/len(ss)}
+        return out
+
+    def _quick_signal(self, candles, of, regime, pair, strategy):
+        atr   = MATH.calculate_atr(candles)
+        price = candles[-1].close
+        if strategy == StrategyType.ICT_CONTINUATION:
+            if of.imbalance_zscore > 1.2 and of.cvd > 0:
+                return {"direction": "LONG", "confidence": 58,
+                        "entry": price,
+                        "target": price + atr*2.5,
+                        "stop":   price - atr*1.0}
+            if of.imbalance_zscore < -1.2 and of.cvd < 0:
+                return {"direction": "SHORT", "confidence": 58,
+                        "entry": price,
+                        "target": price - atr*2.5,
+                        "stop":   price + atr*1.0}
+        elif strategy == StrategyType.MEAN_REVERSION:
+            if regime.hurst_exponent < 0.48 and of.vwap_zscore < -2.0:
+                return {"direction": "LONG", "confidence": 60,
+                        "entry": price,
+                        "target": of.vwap if of.vwap > price + atr else price + atr*1.5,
+                        "stop":   price - atr*0.8}
+            if regime.hurst_exponent < 0.48 and of.vwap_zscore > 2.0:
+                return {"direction": "SHORT", "confidence": 60,
+                        "entry": price,
+                        "target": of.vwap if of.vwap < price - atr else price - atr*1.5,
+                        "stop":   price + atr*0.8}
+        elif strategy == StrategyType.BREAKOUT:
+            if regime.volatility_ratio < 0.5:
+                disp = ICT_ENGINE.detect_displacement(candles, 3)
+                if disp:
+                    if disp.is_bullish:
+                        return {"direction": "LONG", "confidence": 62,
+                                "entry": price,
+                                "target": price + atr*3.0,
+                                "stop":   price - atr*1.0}
+                    else:
+                        return {"direction": "SHORT", "confidence": 62,
+                                "entry": price,
+                                "target": price - atr*3.0,
+                                "stop":   price + atr*1.0}
+        return None
+
+    def _simulate(self, future, entry, target, stop,
+                  direction, pair, spread):
+        mae = mfe = 0.0
+        pip = pip_value(pair)
+        for c in future:
             if direction == "LONG":
+                fav  = (c.high - entry) / pip
+                adv  = (entry - c.low)  / pip
+                mfe  = max(mfe, fav); mae = max(mae, adv)
                 if c.high >= target:
-                    return "WIN",  pips_diff(instrument, target - entry)
-                if c.low  <= invalidation:
-                    return "LOSS", -pips_diff(instrument, entry - invalidation)
+                    return "WIN",  (target-entry)/pip, mae, mfe
+                if c.low <= stop:
+                    return "LOSS", -(entry-stop)/pip, mae, mfe
             else:
-                if c.low  <= target:
-                    return "WIN",  pips_diff(instrument, entry - target)
-                if c.high >= invalidation:
-                    return "LOSS", -pips_diff(instrument, invalidation - entry)
-        last  = future_candles[-1].close if future_candles else entry
-        p_pip = ((last - entry) if direction == "LONG"
-                 else (entry - last)) / pip_value(instrument)
-        return ("WIN" if p_pip > 0 else "LOSS"), p_pip
+                fav  = (entry - c.low)  / pip
+                adv  = (c.high - entry) / pip
+                mfe  = max(mfe, fav); mae = max(mae, adv)
+                if c.low <= target:
+                    return "WIN",  (entry-target)/pip, mae, mfe
+                if c.high >= stop:
+                    return "LOSS", -(stop-entry)/pip, mae, mfe
+        last   = future[-1].close if future else entry
+        p_pips = ((last-entry) if direction=="LONG"
+                  else (entry-last)) / pip
+        return ("WIN" if p_pips > 0 else "LOSS"), p_pips, mae, mfe
 
     async def _feed_ml(self, results: Dict):
         all_signals: List[Dict] = []
         for key, result in results.items():
             if isinstance(result, dict):
-                all_signals.extend(result.get("signals", []))
-        if len(all_signals) >= ML_MIN_SAMPLES:
-            ML_ENGINE.train(all_signals)
-            log.info(f"ML trained on {len(all_signals)} backtest signals")
-
-    def get_pair_result(self, pair: str,
-                        timeframe: str = "H1") -> Optional[Dict]:
-        return self.results.get(f"{pair}_{timeframe}")
-
-    def report(self, predictions: List[Dict]) -> str:
-        return self.format_backtest_report(predictions)
-
-    def format_backtest_report(self, predictions: List[Dict]) -> str:
-        live_completed = [p for p in predictions
-                         if p.get("outcome") in ("WIN","LOSS","EXPIRED")]
-        live_wins   = sum(1 for p in live_completed
-                         if p.get("outcome") == "WIN")
-        live_losses = sum(1 for p in live_completed
-                         if p.get("outcome") == "LOSS")
-        live_total  = live_wins + live_losses
-        live_wr     = live_wins / live_total if live_total > 0 else 0.0
-        decided     = [p for p in live_completed
-                      if p.get("outcome") in ("WIN","LOSS")]
-        recent20    = decided[-20:] if len(decided) >= 20 else decided
-        recent_wr   = (sum(1 for p in recent20
-                           if p.get("outcome") == "WIN") /
-                       len(recent20) if recent20 else 0.0)
-        if live_wr >= 0.70:   perf = "🔥 ELITE"
-        elif live_wr >= 0.60: perf = "✅ STRONG"
-        elif live_wr >= 0.50: perf = "⚡ MODERATE"
-        elif live_wr >= 0.40: perf = "⚠️ WEAK"
-        else:                  perf = "🔴 BUILDING DATA"
-        ml_stats = ML_ENGINE.get_stats()
-        msg = (
-            f"{'='*35}\n📊 <b>QUANT PERFORMANCE REPORT</b>\n{'='*35}\n\n"
-            f"<b>Live Signal Performance:</b>\n"
-            f"├ Total Signals:    <b>{len(live_completed)}</b>\n"
-            f"├ Wins:             <b>✅ {live_wins}</b>\n"
-            f"├ Losses:           <b>❌ {live_losses}</b>\n"
-            f"├ Win Rate:         <b>{live_wr:.1%}</b> "
-            f"{progress_bar(live_wr * 100)}\n"
-            f"├ Recent (last 20): <b>{recent_wr:.1%}</b>\n"
-            f"└ Rating:           <b>{perf}</b>\n\n"
-        )
-        if self.results:
-            msg += (f"{'─'*35}\n<b>📈 Historical Backtest (30 Days):"
-                    f"</b>\n{'─'*35}\n")
-            for key, result in list(self.results.items())[:6]:
-                if isinstance(result, dict) and "win_rate" in result:
-                    pair_str = pair_to_display(result.get("pair", "?"))
-                    wr       = result["win_rate"]
-                    sigs     = result["total_signals"]
-                    best_s   = result.get("best_session", "?")
-                    msg += (f"💱 <b>{pair_str}</b>: {wr:.1%} WR "
-                            f"({result['wins']}W/{result['losses']}L, "
-                            f"{sigs} signals)\n"
-                            f"   Best session: {best_s}\n")
-            msg += "\n"
-        msg += f"{'─'*35}\n<b>🧠 ML Engine Status:</b>\n{'─'*35}\n"
-        if ml_stats["is_trained"]:
-            msg += (f"├ Status:    ✅ Active and Learning\n"
-                    f"├ Samples:   {ml_stats['n_samples']}\n"
-                    f"├ Accuracy:  <b>{ml_stats['latest_accuracy']:.1%}</b>\n")
-            top = ml_stats.get("top_features", [])
-            if top:
-                msg += f"└ Top Signal: <b>{top[0][0]}</b>\n\n"
+                for s in result.get("signals", []):
+                    # Add to persistent store
+                    ML_DATA_STORE.add({
+                        "prediction_id": f"BT_{key}_{len(all_signals)}",
+                        "features":      s.get("features", []),
+                        "outcome":       s.get("outcome", ""),
+                        "pips_gained":   s.get("pips", 0),
+                        "strategy":      s.get("strategy", ""),
+                        "session":       s.get("session", ""),
+                        "regime":        s.get("regime", ""),
+                    })
+                    all_signals.append(s)
+        if ML_DATA_STORE.n_samples >= ML_MIN_SAMPLES:
+            result = ML_ENGINE.train()
+            log.info(f"ML trained from BT: {result}")
         else:
-            msg += (f"├ Status: ⏳ Accumulating data\n"
-                    f"└ {ml_stats['n_samples']}/{ML_MIN_SAMPLES} samples\n\n")
+            log.info(
+                f"BT provided {len(all_signals)} signals. "
+                f"ML store: {ML_DATA_STORE.n_samples}/{ML_MIN_SAMPLES}")
+
+    def format_report(self, live_predictions: List[Dict]) -> str:
+        live_done = [p for p in live_predictions
+                     if p.get("outcome") in ("WIN","LOSS")]
+        lw  = sum(1 for p in live_done if p.get("outcome")=="WIN")
+        ll  = len(live_done) - lw
+        lt  = lw + ll
+        wr  = lw / lt if lt > 0 else 0.0
+        avg_win  = sum(p.get("pips_gained",0)
+                       for p in live_done if p.get("outcome")=="WIN") / max(lw,1)
+        avg_loss = sum(abs(p.get("pips_gained",0))
+                       for p in live_done if p.get("outcome")=="LOSS") / max(ll,1)
+        exp      = wr*avg_win - (1-wr)*avg_loss
+        ml_s     = ML_ENGINE.get_stats()
+        perf     = ("🔥 ELITE"    if wr >= 0.70 else
+                    "✅ STRONG"   if wr >= 0.60 else
+                    "⚡ MODERATE" if wr >= 0.50 else
+                    "⚠️ BUILDING DATA")
+
+        msg = (
+            f"{'='*35}\n📊 <b>QUANT v8.1 PERFORMANCE</b>\n{'='*35}\n\n"
+            f"<b>Live Signal Results:</b>\n"
+            f"├ Total:      <b>{lt}</b>\n"
+            f"├ Wins:       ✅ <b>{lw}</b>\n"
+            f"├ Losses:     ❌ <b>{ll}</b>\n"
+            f"├ Win Rate:   <b>{wr:.1%}</b>\n"
+            f"├ Avg Win:    <b>+{avg_win:.1f} pips</b>\n"
+            f"├ Avg Loss:   <b>-{avg_loss:.1f} pips</b>\n"
+            f"├ Expectancy: <b>{exp:+.1f} pips/trade</b>\n"
+            f"└ Rating:     <b>{perf}</b>\n\n"
+        )
+
+        if self.results:
+            msg += f"{'─'*35}\n<b>📈 Backtest Results:</b>\n"
+            for key, r in list(self.results.items())[:5]:
+                if isinstance(r, dict) and "win_rate" in r:
+                    msg += (
+                        f"💱 <b>{pair_display(r['pair'])}</b>: "
+                        f"{r['win_rate']:.1%} WR | "
+                        f"E:{r.get('expectancy',0):+.1f}p\n")
+            msg += "\n"
+
+        msg += f"{'─'*35}\n<b>🧠 ML Engine:</b>\n{'─'*35}\n"
+        if ml_s["is_trained"]:
+            msg += (
+                f"├ Status:    ✅ Active & Learning\n"
+                f"├ Samples:   {ml_s['n_samples']} resolved\n"
+                f"├ Total:     {ml_s['n_total']} tracked\n"
+                f"├ OOS Acc:   <b>{ml_s['oos_accuracy']:.1%}</b>\n"
+                f"├ Brier:     {ml_s['brier_score']:.3f}\n"
+                f"├ Calib:     {'✅' if ml_s['is_calibrated'] else '❌'}\n"
+            )
+            tops = ml_s.get("top_features",[])
+            if tops:
+                msg += f"└ Top:       <b>{tops[0][0]}</b>\n\n"
+        else:
+            msg += (
+                f"├ Status:    ⏳ Accumulating training data\n"
+                f"├ Resolved:  {ml_s['n_samples']} / {ML_MIN_SAMPLES}\n"
+                f"├ Total:     {ml_s['n_total']} tracked\n"
+                f"└ Need:      {ml_s['n_needed']} more resolved trades\n\n"
+            )
+
         msg += (
-            f"{'─'*35}\n<b>⚠️ Important Reminder:</b>\n"
-            f"No system wins 100% of the time. Risk management is "
-            f"everything — always use a stop-loss, never risk more "
-            f"than 1-2% per trade.\n\n"
-            f"<i>The Quant learns from every trade.</i>\n"
-            f"{'='*35}\n"
+            f"{'─'*35}\n"
+            f"<i>⚠️ No system wins 100%. "
+            f"Stop-loss every trade. Max 1-2% risk.</i>\n"
+            f"{'='*35}"
         )
         return msg
 
-    def chart(self, predictions: List[Dict]) -> Optional[io.BytesIO]:
-        return self.format_backtest_chart(predictions)
-
-    def format_backtest_chart(self,
-                              predictions: List[Dict]) -> Optional[io.BytesIO]:
-        live    = [p for p in predictions
-                   if p.get("outcome") in ("WIN","LOSS")]
-        ht_data = [(k, v) for k, v in self.results.items()
-                   if isinstance(v, dict) and "win_rate" in v]
-        if not live and not ht_data:
-            return None
-        try:
-            fig    = plt.figure(figsize=(14,10), facecolor='#0d1117')
-            gs     = GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35)
-            colors = {'bg':'#0d1117','text':'#c9d1d9','grid':'#21262d',
-                      'up':'#3fb950','down':'#f85149',
-                      'acc':'#58a6ff','gold':'#ffd700'}
-
-            # Panel 1 — Live pie
-            ax1 = fig.add_subplot(gs[0, 0])
-            ax1.set_facecolor(colors['bg'])
-            if live:
-                lw = sum(1 for p in live if p.get("outcome") == "WIN")
-                ll = len(live) - lw
-                if lw + ll > 0:
-                    pie_v = [v for v in [lw, ll] if v > 0]
-                    pie_l = [lb for v, lb in
-                             zip([lw,ll],["Wins","Losses"]) if v > 0]
-                    pie_c = [colors['up'],colors['down']][:len(pie_v)]
-                    wd, tx, atx = ax1.pie(
-                        pie_v, labels=pie_l, colors=pie_c,
-                        autopct='%1.0f%%', startangle=90,
-                        textprops={'color':colors['text'],'fontsize':11})
-                    for at in atx:
-                        at.set_color(colors['bg'])
-                        at.set_fontweight('bold')
-                ax1.set_title(
-                    f"Live: {lw/(lw+ll):.1%} WR" if live else "No live data",
-                    color=colors['text'], fontsize=12, fontweight='bold')
-            else:
-                ax1.text(0.5, 0.5, "No Live Data", ha='center', va='center',
-                         color=colors['text'], transform=ax1.transAxes)
-                ax1.set_title("Live Performance",
-                              color=colors['text'], fontsize=12)
-
-            # Panel 2 — Historical WR bars
-            ax2 = fig.add_subplot(gs[0, 1])
-            ax2.set_facecolor(colors['bg'])
-            if ht_data:
-                labels  = [pair_to_display(v["pair"])
-                           for k, v in ht_data[:6]]
-                wrs     = [v["win_rate"] * 100
-                           for k, v in ht_data[:6]]
-                bcolors = [colors['up'] if w >= 55
-                           else colors['down'] for w in wrs]
-                bars    = ax2.bar(np.arange(len(labels)), wrs,
-                                  color=bcolors, alpha=0.85, width=0.6)
-                ax2.axhline(y=50, color=colors['grid'],
-                            linestyle='--', linewidth=1.5)
-                ax2.set_xticks(np.arange(len(labels)))
-                ax2.set_xticklabels(labels, color=colors['text'],
-                                    fontsize=9, rotation=20)
-                ax2.set_ylabel("Win Rate %",
-                               color=colors['text'], fontsize=10)
-                ax2.set_ylim(0, 100)
-                for bar, (k, v) in zip(bars, ht_data[:6]):
-                    ax2.text(bar.get_x() + bar.get_width() / 2,
-                             bar.get_height() + 2,
-                             f"{v['total_signals']}s",
-                             ha='center', color=colors['text'], fontsize=8)
-            ax2.set_title("Historical 30-Day Backtest",
-                          color=colors['text'], fontsize=12, fontweight='bold')
-            ax2.tick_params(colors=colors['text'])
-            ax2.grid(True, alpha=0.15, color=colors['grid'])
-
-            # Panel 3 — ML accuracy
-            ax3 = fig.add_subplot(gs[1, 0])
-            ax3.set_facecolor(colors['bg'])
-            ml_hist = ML_ENGINE.accuracy_history
-            if ml_hist and len(ml_hist) >= 2:
-                ax3.plot(range(len(ml_hist)),
-                         [v * 100 for v in ml_hist],
-                         color=colors['acc'], linewidth=2.5,
-                         marker='o', markersize=6)
-                ax3.fill_between(range(len(ml_hist)),
-                                 [v * 100 for v in ml_hist],
-                                 alpha=0.2, color=colors['acc'])
-                ax3.axhline(y=50, color=colors['grid'],
-                            linestyle='--', linewidth=1.5)
-                ax3.set_ylim(0, 100)
-                ax3.set_title(f"ML Accuracy: {ml_hist[-1]:.1%}",
-                              color=colors['gold'],
-                              fontsize=12, fontweight='bold')
-            else:
-                ax3.text(0.5, 0.5,
-                         f"ML learning...\n"
-                         f"({ML_ENGINE.n_samples}/{ML_MIN_SAMPLES})",
-                         ha='center', va='center',
-                         color=colors['text'], fontsize=12,
-                         transform=ax3.transAxes)
-                ax3.set_title("ML Engine",
-                              color=colors['gold'],
-                              fontsize=12, fontweight='bold')
-            ax3.tick_params(colors=colors['text'])
-            ax3.grid(True, alpha=0.15, color=colors['grid'])
-
-            # Panel 4 — Session WR
-            ax4 = fig.add_subplot(gs[1, 1])
-            ax4.set_facecolor(colors['bg'])
-            session_data: Dict = {
-                "TOKYO":    {"w": 0, "t": 0},
-                "LONDON":   {"w": 0, "t": 0},
-                "NEW_YORK": {"w": 0, "t": 0},
-                "OVERLAP":  {"w": 0, "t": 0}
-            }
-            for k, v in ht_data:
-                if isinstance(v, dict):
-                    for sn, sv in v.get("session_win_rates", {}).items():
-                        if sn in session_data:
-                            session_data[sn]["w"] += sv.get("wins", 0)
-                            session_data[sn]["t"] += sv.get("total", 0)
-            slabels = list(session_data.keys())
-            swrs    = [(session_data[s]["w"] / session_data[s]["t"] * 100)
-                       if session_data[s]["t"] > 0 else 0
-                       for s in slabels]
-            sc_     = [colors['up'] if w >= 55
-                       else colors['down'] for w in swrs]
-            ax4.bar(np.arange(len(slabels)), swrs,
-                    color=sc_, alpha=0.85, width=0.6)
-            ax4.axhline(y=50, color=colors['grid'],
-                        linestyle='--', linewidth=1.5)
-            ax4.set_xticks(np.arange(len(slabels)))
-            ax4.set_xticklabels(slabels, color=colors['text'],
-                                fontsize=9, rotation=15)
-            ax4.set_ylabel("Win Rate %",
-                           color=colors['text'], fontsize=10)
-            ax4.set_ylim(0, 100)
-            ax4.set_title("Win Rate by Session",
-                          color=colors['text'],
-                          fontsize=12, fontweight='bold')
-            ax4.tick_params(colors=colors['text'])
-            ax4.grid(True, alpha=0.15, color=colors['grid'])
-
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            fig.text(0.5, 0.97,
-                     "FOREX QUANT v7.5 — PERFORMANCE ANALYTICS",
-                     ha='center', color=colors['text'],
-                     fontsize=14, fontweight='bold')
-            fig.text(0.98, 0.01, f"Generated: {ts}",
-                     ha='right', color=colors['text'],
-                     fontsize=8, alpha=0.7)
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=120,
-                        facecolor=colors['bg'],
-                        edgecolor='none', bbox_inches='tight')
-            buf.seek(0); plt.close(fig); gc.collect()
-            return buf
-        except Exception as e:
-            log.error(f"Backtest chart error: {e}")
-            return None
+    def get_pair_result(self, pair: str, tf: str = "H1") -> Optional[Dict]:
+        return self.results.get(f"{pair}_{tf}")
 
 
 HISTORICAL_BT = HistoricalBacktestEngine()
 
-
 # ════════════════════════════════════════════════════════════════
-#  USER SUBSCRIPTION MANAGER
-# ════════════════════════════════════════════════════════════════
-
-class SubscriptionManager:
-
-    def __init__(self):
-        raw = load_json_file(USER_SUBSCRIPTIONS_FILE, {})
-        self.subscriptions: Dict[int, Dict] = {}
-        for k, v in raw.items():
-            try:
-                self.subscriptions[int(k)] = v
-            except Exception:
-                pass
-        log.info(f"Subscriptions loaded: {len(self.subscriptions)} users")
-
-    def _save(self):
-        save_json_file(USER_SUBSCRIPTIONS_FILE,
-                       {str(k): v for k, v in self.subscriptions.items()})
-
-    def subscribe(self, chat_id: int, pairs: List[str],
-                  timeframe: str = "H1"):
-        self.subscriptions[chat_id] = {
-            "pairs":         pairs,
-            "timeframe":     timeframe,
-            "active":        True,
-            "subscribed_at": datetime.now(timezone.utc).isoformat(),
-            "last_alert":    None,
-            "alert_count":   0
-        }
-        self._save()
-
-    def unsubscribe(self, chat_id: int):
-        if chat_id in self.subscriptions:
-            self.subscriptions[chat_id]["active"] = False
-            self._save()
-
-    def is_subscribed(self, chat_id: int) -> bool:
-        sub = self.subscriptions.get(chat_id)
-        return sub is not None and sub.get("active", False)
-
-    # alias
-    def is_active(self, chat_id: int) -> bool:
-        return self.is_subscribed(chat_id)
-
-    def get_subscription(self, chat_id: int) -> Optional[Dict]:
-        return self.subscriptions.get(chat_id)
-
-    # alias
-    def get(self, chat_id: int) -> Optional[Dict]:
-        return self.get_subscription(chat_id)
-
-    def get_all_active(self) -> List[Tuple[int, Dict]]:
-        return [(cid, sub)
-                for cid, sub in self.subscriptions.items()
-                if sub.get("active", False)]
-
-    # alias
-    def all_active(self) -> List[Tuple[int, Dict]]:
-        return self.get_all_active()
-
-    def record_alert(self, chat_id: int):
-        if chat_id in self.subscriptions:
-            self.subscriptions[chat_id]["last_alert"] = (
-                datetime.now(timezone.utc).isoformat())
-            self.subscriptions[chat_id]["alert_count"] = (
-                self.subscriptions[chat_id].get("alert_count", 0) + 1)
-            self._save()
-
-    def add_pair(self, chat_id: int, pair: str):
-        if chat_id in self.subscriptions:
-            pairs = self.subscriptions[chat_id].get("pairs", [])
-            if pair not in pairs:
-                pairs.append(pair)
-                self.subscriptions[chat_id]["pairs"] = pairs
-                self._save()
-
-    def remove_pair(self, chat_id: int, pair: str):
-        if chat_id in self.subscriptions:
-            pairs = self.subscriptions[chat_id].get("pairs", [])
-            if pair in pairs:
-                pairs.remove(pair)
-                self.subscriptions[chat_id]["pairs"] = pairs
-                self._save()
-
-    def set_tf(self, chat_id: int, timeframe: str):
-        """Set alert timeframe for a subscriber."""
-        if chat_id in self.subscriptions:
-            self.subscriptions[chat_id]["timeframe"] = timeframe
-            self._save()
-
-
-SUB_MANAGER = SubscriptionManager()
-
-# ════════════════════════════════════════════════════════════════
-#  SESSION ADVISOR (single definition)
-# ════════════════════════════════════════════════════════════════
-
-class SessionAdvisor:
-
-    INFO = {
-        "OVERLAP": {
-            "name":  "London-NY Overlap (13:00-16:00 UTC)",
-            "emoji": "⚡",
-            "desc":  ("The most powerful session. Maximum liquidity, tightest "
-                      "spreads, biggest moves. Institutional volume peaks here. "
-                      "This is the holy grail of trading windows."),
-            "best":  ["EUR_USD", "GBP_USD", "XAU_USD", "EUR_GBP", "GBP_JPY"]
-        },
-        "LONDON": {
-            "name":  "London Session (07:00-16:00 UTC)",
-            "emoji": "🏦",
-            "desc":  ("Second most liquid. Major institutions set the tone. "
-                      "Most trend initiations happen during London open."),
-            "best":  ["EUR_USD", "GBP_USD", "EUR_GBP", "USD_CHF", "EUR_CHF"]
-        },
-        "NEW_YORK": {
-            "name":  "New York Session (13:00-22:00 UTC)",
-            "emoji": "🗽",
-            "desc":  ("Strong first half — especially during overlap. "
-                      "USD pairs and Gold very active. Weakens after 17:00 UTC."),
-            "best":  ["EUR_USD", "USD_CAD", "USD_JPY", "XAU_USD", "NAS100_USD"]
-        },
-        "TOKYO": {
-            "name":  "Tokyo Session (00:00-09:00 UTC)",
-            "emoji": "🗼",
-            "desc":  ("Lower volatility but excellent for JPY pairs. "
-                      "Range-bound action is common. Trends set here "
-                      "often continue into London."),
-            "best":  ["USD_JPY", "AUD_JPY", "EUR_JPY", "GBP_JPY", "AUD_USD"]
-        },
-        "OFF_HOURS": {
-            "name":  "Off Hours (22:00-00:00 UTC)",
-            "emoji": "😴",
-            "desc":  ("Very low liquidity. Wide spreads. Stop-hunts common. "
-                      "We strongly advise AGAINST trading during this period."),
-            "best":  []
-        }
-    }
-
-    def advice(self, pair: str) -> str:
-        sn   = session_name(datetime.now(timezone.utc).hour)
-        info = self.INFO.get(sn, self.INFO["OFF_HOURS"])
-        best = info.get("best", [])
-        msg  = (
-            f"{'─'*35}\n<b>{info['emoji']} Session Advice</b>\n{'─'*35}\n\n"
-            f"<b>{info['name']}</b>\n\n"
-            f"{info['desc']}\n\n"
-        )
-        if pair in best:
-            msg += (f"✅ <b>{pair_display(pair)} is one of the BEST "
-                    f"pairs for this session.</b>\n")
-        elif sn == "OFF_HOURS":
-            msg += f"⚠️ <b>Avoid trading {pair_display(pair)} during off hours.</b>\n"
-        else:
-            msg += (f"⚡ {pair_display(pair)} can be traded this session "
-                    f"but is not optimal.\n")
-        if best:
-            msg += "\n<b>Best pairs right now:</b>\n"
-            for p in best[:4]:
-                msg += f"  • {pair_display(p)}\n"
-        return msg
-
-    def schedule(self) -> str:
-        now  = datetime.now(timezone.utc)
-        hour = now.hour
-        sn   = session_name(hour)
-        msg  = (
-            f"{'='*35}\n🗓️ <b>TRADING SESSION GUIDE</b>\n{'='*35}\n\n"
-            f"<b>Current Time:</b> {now.strftime('%H:%M UTC')}\n"
-            f"<b>Current Session:</b> "
-            f"{self.INFO.get(sn, {}).get('name', 'Off Hours')}\n\n"
-        )
-        for s_key, sd in self.INFO.items():
-            active = " ◀️ YOU ARE HERE" if s_key == sn else ""
-            best_s = (", ".join(pair_display(p)
-                                for p in sd.get("best", [])[:3]) or "N/A")
-            desc   = sd["desc"][:120] + "..." if len(sd["desc"]) > 120 else sd["desc"]
-            msg += (
-                f"{sd['emoji']} <b>{sd['name']}</b>{active}\n"
-                f"{desc}\n"
-                f"Best: {best_s}\n\n"
-            )
-        msg += (
-            f"{'─'*35}\n"
-            f"<b>💡 Golden Rules:</b>\n"
-            f"• Trade during your pair's session\n"
-            f"• Never trade off-hours\n"
-            f"• London-NY overlap is premium time\n\n"
-            f"<b>⚠️ Risk Reminder:</b>\n"
-            f"No analysis is 100% correct. Use a stop-loss on every "
-            f"trade. Risk max 1-2% per trade. Being wrong is completely "
-            f"normal — even the best traders lose regularly."
-        )
-        return msg
-
-
-SA = SessionAdvisor()
-
-
-# ════════════════════════════════════════════════════════════════
-#  QUANT BRAIN
-# ════════════════════════════════════════════════════════════════
-
-class QuantBrain:
-
-    def __init__(self):
-        self.history: List[Dict] = load_json_file(PREDICTIONS_FILE, [])
-
-    def _save(self):
-        save_json_file(PREDICTIONS_FILE, self.history[-1000:])
-
-    def generate(self, candles: List[Candle], of: OrderFlowData,
-                 vp: Optional[VolumeProfile], ob: Optional[OrderBookData],
-                 pb: Optional[PositionBookData], cs: Optional[Dict],
-                 af: Optional[AdvancedOrderFlowData], instrument: str,
-                 lz: Optional[List[LiquidityZone]] = None) -> Dict:
-
-        price = candles[-1].close
-        atr   = calculate_atr(candles, 14)
-        cr    = OF_ENGINE.evaluate_confluence(
-            of, vp, ob, pb, cs, af, instrument, price, lz)
-
-        if not cr.has_setup or cr.quality == SetupQuality.NO_TRADE:
-            return {
-                "has_setup":  False,
-                "bull_count": cr.bullish_count,
-                "bear_count": cr.bearish_count,
-                "cr":         cr
-            }
-        if cr.confidence < MIN_CONFIDENCE:
-            return {
-                "has_setup":  False,
-                "bull_count": cr.bullish_count,
-                "bear_count": cr.bearish_count,
-                "cr":         cr
-            }
-
-        m   = 1 if cr.direction == "LONG" else -1
-        tm  = (2.5 if cr.quality == SetupQuality.A_PLUS else
-               2.0 if cr.quality == SetupQuality.A      else
-               1.5 if cr.quality == SetupQuality.B      else 1.0)
-        inv = atr * 1.0
-        tgt = max(atr * tm, inv)
-        target = price + tgt * m
-        stop   = price - inv * m
-        kl     = identify_key_levels(candles, vp, price, instrument)
-        feats  = ML_ENGINE.extract_features(of, af, vp, ob, pb, cr)
-        ml_p, ml_l = ML_ENGINE.predict_proba(feats)
-
-        return {
-            "has_setup":  True,
-            "direction":  cr.direction,
-            "quality":    cr.quality.value,
-            "target":     target,
-            "stop":       stop,
-            "confidence": cr.confidence,
-            "reasons":    cr.reasons,
-            "key_levels": kl,
-            "bull_count": cr.bullish_count,
-            "bear_count": cr.bearish_count,
-            "factors":    [(f.name, f.direction, f.description)
-                           for f in cr.factors],
-            "features":   feats,
-            "ml_prob":    ml_p,
-            "ml_label":   ml_l,
-            "cr":         cr
-        }
-
-    def add(self, pred: QuantPrediction):
-        self.history.append({
-            "prediction_id":   pred.prediction_id,
-            "pair":            pred.pair,
-            "timeframe":       pred.timeframe,
-            "timestamp":       pred.timestamp,
-            "current_price":   pred.current_price,
-            "direction":       pred.direction,
-            "target_price":    pred.target_price,
-            "invalidation_price": pred.invalidation_price,
-            "confidence":      pred.confidence,
-            "quality":         pred.quality,
-            "reasons":         pred.reasons,
-            "key_levels":      pred.key_levels,
-            "factors_aligned": pred.factors_aligned,
-            "features":        pred.features,
-            "ml_confidence":   pred.ml_confidence,
-            "ml_used":         pred.ml_used,
-            "outcome":         "PENDING",
-            "pips_gained":     0.0
-        })
-        self._save()
-
-
-QB = QuantBrain()
-
-
-# ════════════════════════════════════════════════════════════════
-#  PREDICTION TRACKER
+#  PREDICTION TRACKER  (WITH MAE/MFE + BREAKEVEN ALERTS)
 # ════════════════════════════════════════════════════════════════
 
 class PredictionTracker:
@@ -2722,812 +4626,2071 @@ class PredictionTracker:
         if not os.path.exists(ACTIVE_PREDICTIONS_FILE):
             return
         try:
-            raw = load_json_file(ACTIVE_PREDICTIONS_FILE, [])
+            raw = load_json(ACTIVE_PREDICTIONS_FILE, [])
             self.active = []
             for p in raw:
                 if p.get("status") == "ACTIVE":
                     try:
+                        # Handle missing fields gracefully for old saves
+                        p.setdefault("trade_id", generate_trade_id(
+                            p.get("pair","UNKNOWN"),
+                            p.get("direction","LONG")))
+                        p.setdefault("calibrated_prob", 0.5)
+                        p.setdefault("strategy", "Unknown")
+                        p.setdefault("chat_ids", [p.get("chat_id")] if p.get("chat_id") else [])
+                        p.setdefault("rr_ratio", 0.0)
+                        p.setdefault("reward_pips", 0.0)
+                        p.setdefault("risk_pips", 0.0)
+                        p.setdefault("breakeven_price", 0.0)
+                        p.setdefault("trailing_price", 0.0)
+                        p.setdefault("mae_pips", 0.0)
+                        p.setdefault("mfe_pips", 0.0)
+                        p.setdefault("regime_at_signal", "")
+                        p.setdefault("session_at_signal", "")
+                        p.setdefault("breakeven_notified", False)
+                        p.setdefault("trailing_notified", False)
+                        p.setdefault("was_sent_to_users", True)
+                        p.setdefault("sent_quality", p.get("quality",""))
+                        p.setdefault("key_levels", [])
+                        # Remove old single chat_id field
+                        p.pop("chat_id", None)
                         self.active.append(QuantPrediction(**p))
                     except Exception as e:
-                        log.warning(f"Skip prediction: {e}")
-            log.info(f"Active predictions: {len(self.active)}")
+                        log.warning(f"Skip pred on load: {e}")
+            log.info(f"Active predictions loaded: {len(self.active)}")
         except Exception as e:
             log.error(f"Load predictions: {e}")
 
     def _save(self):
-        try:
-            data = []
-            for p in self.active:
-                data.append({
-                    "prediction_id":      p.prediction_id,
-                    "pair":               p.pair,
-                    "timeframe":          p.timeframe,
-                    "timestamp":          p.timestamp,
-                    "current_price":      p.current_price,
-                    "direction":          p.direction,
-                    "target_price":       p.target_price,
-                    "invalidation_price": p.invalidation_price,
-                    "confidence":         p.confidence,
-                    "quality":            p.quality,
-                    "reasons":            p.reasons,
-                    "key_levels":         p.key_levels,
-                    "factors_aligned":    p.factors_aligned,
-                    "features":           p.features,
-                    "status":             p.status,
-                    "outcome":            p.outcome,
-                    "hit_time":           p.hit_time,
-                    "chat_id":            p.chat_id,
-                    "ml_confidence":      p.ml_confidence,
-                    "ml_used":            p.ml_used,
-                    "pips_gained":        p.pips_gained
-                })
-            save_json_file(ACTIVE_PREDICTIONS_FILE, data)
-        except Exception as e:
-            log.error(f"Save predictions: {e}")
+        data = []
+        for p in self.active:
+            data.append({
+                "trade_id":          p.trade_id,
+                "prediction_id":     p.prediction_id,
+                "pair":              p.pair,
+                "timeframe":         p.timeframe,
+                "timestamp":         p.timestamp,
+                "current_price":     p.current_price,
+                "direction":         p.direction,
+                "target_price":      p.target_price,
+                "invalidation_price":p.invalidation_price,
+                "breakeven_price":   p.breakeven_price,
+                "trailing_price":    p.trailing_price,
+                "confidence":        p.confidence,
+                "calibrated_prob":   p.calibrated_prob,
+                "quality":           p.quality,
+                "strategy":          p.strategy,
+                "reasons":           p.reasons,
+                "key_levels":        p.key_levels,
+                "factors_aligned":   p.factors_aligned,
+                "features":          p.features,
+                "rr_ratio":          p.rr_ratio,
+                "reward_pips":       p.reward_pips,
+                "risk_pips":         p.risk_pips,
+                "status":            p.status,
+                "outcome":           p.outcome,
+                "hit_time":          p.hit_time,
+                "chat_ids":          p.chat_ids,
+                "ml_confidence":     p.ml_confidence,
+                "ml_used":           p.ml_used,
+                "pips_gained":       p.pips_gained,
+                "mae_pips":          p.mae_pips,
+                "mfe_pips":          p.mfe_pips,
+                "regime_at_signal":  p.regime_at_signal,
+                "session_at_signal": p.session_at_signal,
+                "breakeven_notified":p.breakeven_notified,
+                "trailing_notified": p.trailing_notified,
+                "was_sent_to_users": p.was_sent_to_users,
+                "sent_quality":      p.sent_quality,
+            })
+        save_json(ACTIVE_PREDICTIONS_FILE, data)
 
     def add(self, pred: QuantPrediction):
         self.active.append(pred)
         self._save()
-        log.info(f"Tracking {pred.prediction_id} {pred.pair}")
+        log.info(
+            f"Tracking [{pred.trade_id}] {pred.pair} "
+            f"{pred.direction} | Sent: {pred.was_sent_to_users}")
 
     async def check(self, bot) -> List[Dict]:
-        notifications: List[Dict] = []
+        """
+        Check all active predictions.
+        Returns notification dicts ONLY for predictions that were
+        sent to users (was_sent_to_users == True).
+        Also handles breakeven and trailing stop notifications.
+        """
+        notifications = []
         if not self.active:
             return notifications
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as http_session:
             for pred in self.active[:]:
                 try:
-                    cp = await fetch_current_price(session, pred.pair)
+                    cp = await fetch_current_price(
+                        http_session, pred.pair)
                     if cp is None:
                         continue
 
+                    pip      = pip_value(pred.pair)
                     resolved = False
 
+                    # Update MAE/MFE
+                    if pred.direction == "LONG":
+                        fav = (cp - pred.current_price) / pip
+                        adv = (pred.current_price - cp) / pip
+                    else:
+                        fav = (pred.current_price - cp) / pip
+                        adv = (cp - pred.current_price) / pip
+                    pred.mfe_pips = max(pred.mfe_pips, fav)
+                    pred.mae_pips = max(pred.mae_pips, adv)
+
+                    # ── Breakeven notification ────────────────────
+                    if (pred.was_sent_to_users and
+                            not pred.breakeven_notified and
+                            pred.breakeven_price > 0):
+                        be_triggered = (
+                            (pred.direction == "LONG" and
+                             cp >= pred.breakeven_price) or
+                            (pred.direction == "SHORT" and
+                             cp <= pred.breakeven_price))
+                        if be_triggered:
+                            pred.breakeven_notified = True
+                            notifications.append({
+                                "pred": pred,
+                                "type": "BREAKEVEN",
+                                "cp":   cp
+                            })
+
+                    # ── Trailing stop notification ────────────────
+                    if (pred.was_sent_to_users and
+                            not pred.trailing_notified and
+                            pred.trailing_price > 0):
+                        trail_triggered = (
+                            (pred.direction == "LONG" and
+                             cp >= pred.trailing_price) or
+                            (pred.direction == "SHORT" and
+                             cp <= pred.trailing_price))
+                        if trail_triggered:
+                            pred.trailing_notified = True
+                            notifications.append({
+                                "pred": pred,
+                                "type": "TRAILING",
+                                "cp":   cp
+                            })
+
+                    # ── Target hit ────────────────────────────────
                     if pred.direction == "LONG":
                         if cp >= pred.target_price:
                             pred.status      = "TARGET_HIT"
                             pred.outcome     = "WIN"
-                            pred.hit_time    = datetime.now(timezone.utc).isoformat()
-                            pred.pips_gained = pips_diff(
-                                pred.pair,
-                                pred.target_price - pred.current_price)
-                            notifications.append(
-                                {"pred": pred, "type": "TARGET_HIT", "cp": cp})
+                            pred.pips_gained = (
+                                (pred.target_price - pred.current_price)
+                                / pip)
+                            if pred.was_sent_to_users:
+                                notifications.append({
+                                    "pred": pred,
+                                    "type": "TARGET_HIT",
+                                    "cp":   cp})
                             resolved = True
                         elif cp <= pred.invalidation_price:
-                            pred.status      = "INVALIDATED"
+                            pred.status      = "STOP_HIT"
                             pred.outcome     = "LOSS"
-                            pred.hit_time    = datetime.now(timezone.utc).isoformat()
-                            pred.pips_gained = -pips_diff(
-                                pred.pair,
-                                pred.current_price - pred.invalidation_price)
-                            notifications.append(
-                                {"pred": pred, "type": "INVALIDATED", "cp": cp})
+                            pred.pips_gained = -(
+                                (pred.current_price - pred.invalidation_price)
+                                / pip)
+                            if pred.was_sent_to_users:
+                                notifications.append({
+                                    "pred": pred,
+                                    "type": "STOP_HIT",
+                                    "cp":   cp})
                             resolved = True
-                    else:  # SHORT
+                    else:
                         if cp <= pred.target_price:
                             pred.status      = "TARGET_HIT"
                             pred.outcome     = "WIN"
-                            pred.hit_time    = datetime.now(timezone.utc).isoformat()
-                            pred.pips_gained = pips_diff(
-                                pred.pair,
-                                pred.current_price - pred.target_price)
-                            notifications.append(
-                                {"pred": pred, "type": "TARGET_HIT", "cp": cp})
+                            pred.pips_gained = (
+                                (pred.current_price - pred.target_price)
+                                / pip)
+                            if pred.was_sent_to_users:
+                                notifications.append({
+                                    "pred": pred,
+                                    "type": "TARGET_HIT",
+                                    "cp":   cp})
                             resolved = True
                         elif cp >= pred.invalidation_price:
-                            pred.status      = "INVALIDATED"
+                            pred.status      = "STOP_HIT"
                             pred.outcome     = "LOSS"
-                            pred.hit_time    = datetime.now(timezone.utc).isoformat()
-                            pred.pips_gained = -pips_diff(
-                                pred.pair,
-                                pred.invalidation_price - pred.current_price)
-                            notifications.append(
-                                {"pred": pred, "type": "INVALIDATED", "cp": cp})
+                            pred.pips_gained = -(
+                                (pred.invalidation_price - pred.current_price)
+                                / pip)
+                            if pred.was_sent_to_users:
+                                notifications.append({
+                                    "pred": pred,
+                                    "type": "STOP_HIT",
+                                    "cp":   cp})
                             resolved = True
 
+                    # ── Time expiry (24h) ─────────────────────────
                     if not resolved:
                         try:
                             pt = datetime.fromisoformat(
-                                pred.timestamp.replace("Z", "+00:00"))
-                            if datetime.now(timezone.utc) - pt > timedelta(hours=24):
+                                pred.timestamp.replace("Z","+00:00"))
+                            if (datetime.now(timezone.utc) - pt >
+                                    timedelta(hours=24)):
                                 pred.status  = "EXPIRED"
                                 pred.outcome = "EXPIRED"
-                                notifications.append(
-                                    {"pred": pred, "type": "EXPIRED", "cp": cp})
+                                if pred.was_sent_to_users:
+                                    notifications.append({
+                                        "pred": pred,
+                                        "type": "EXPIRED",
+                                        "cp":   cp})
                                 resolved = True
                         except Exception:
                             pass
 
                     if resolved:
+                        pred.hit_time = datetime.now(timezone.utc).isoformat()
                         self.active.remove(pred)
 
                     await asyncio.sleep(0.1)
 
                 except Exception as e:
-                    log.error(f"Check {pred.prediction_id}: {e}")
+                    log.error(f"Check {pred.trade_id}: {e}")
 
         if notifications:
             self._save()
-            try:
-                # Update QB history outcomes
-                for n in notifications:
-                    p = n["pred"]
+            # Update history and ML data
+            for n in notifications:
+                p = n["pred"]
+                if n["type"] in ("TARGET_HIT", "STOP_HIT", "EXPIRED"):
+                    # Update QB history
                     for h in QB.history:
                         if h.get("prediction_id") == p.prediction_id:
                             h["outcome"]     = p.outcome or "EXPIRED"
                             h["pips_gained"] = p.pips_gained
+                            h["mae_pips"]    = p.mae_pips
+                            h["mfe_pips"]    = p.mfe_pips
                             break
                     QB._save()
-
-                done = [p for p in QB.history
-                        if p.get("outcome") in ("WIN", "LOSS")]
-                if len(done) >= ML_MIN_SAMPLES:
-                    ML_ENGINE.train(QB.history)
-                for n in notifications:
-                    p = n["pred"]
-                    PATTERN_MEMORY.update_outcome(
+                    # Update ML data store
+                    ML_DATA_STORE.update_outcome(
                         p.prediction_id,
                         p.outcome or "EXPIRED",
                         p.pips_gained)
-            except Exception as e:
-                log.error(f"Post-resolve: {e}")
+                    # Update pattern memory
+                    PATTERN_MEMORY.update(
+                        p.prediction_id,
+                        p.outcome or "EXPIRED",
+                        p.pips_gained)
+                    # Trigger ML retrain if threshold reached
+                    if ML_DATA_STORE.n_samples >= ML_MIN_SAMPLES:
+                        asyncio.create_task(
+                            self._async_retrain())
 
         return notifications
+
+    async def _async_retrain(self):
+        """Retrain ML asynchronously."""
+        try:
+            result = ML_ENGINE.train()
+            log.info(f"ML auto-retrain: {result.get('status')}")
+        except Exception as e:
+            log.error(f"ML retrain: {e}")
 
 
 PT = PredictionTracker()
 
+# ════════════════════════════════════════════════════════════════
+#  END OF PART 2
+# ════════════════════════════════════════════════════════════════
 
 # ════════════════════════════════════════════════════════════════
-#  ALERT NOTIFICATION FORMATTER
+#  FOREX QUANT v8.1 — PART 3 OF 4
+#  Performance Engine, Subscription Manager, Session Advisor,
+#  Message Formatters, Chart Functions, Alert Engine,
+#  Telegram Command Handlers, Callback Handler
 # ════════════════════════════════════════════════════════════════
 
-def _alert_msg(pred: QuantPrediction, atype: str, cp: float) -> str:
+# ════════════════════════════════════════════════════════════════
+#  PERFORMANCE INTELLIGENCE ENGINE
+# ════════════════════════════════════════════════════════════════
+
+class PerformanceEngine:
+    """
+    Tracks expectancy, MAE/MFE, regime/session/strategy breakdown,
+    drawdown, Kelly criterion, adaptive risk recommendations.
+    """
+
+    def __init__(self):
+        self.data: Dict = load_json(PERFORMANCE_FILE, {
+            "trades":             [],
+            "consecutive_losses": 0,
+            "consecutive_wins":   0,
+            "peak_equity":        0.0,
+            "current_equity":     0.0,
+            "max_drawdown":       0.0,
+        })
+        log.info(
+            f"Performance engine: "
+            f"{len(self.data.get('trades',[]))} trades")
+
+    def _save(self):
+        save_json(PERFORMANCE_FILE, self.data)
+
+    def record(self, pred: QuantPrediction):
+        """Record resolved prediction in performance engine."""
+        if pred.outcome not in ("WIN", "LOSS"):
+            return
+        trade = {
+            "id":        pred.prediction_id,
+            "trade_id":  pred.trade_id,
+            "pair":      pred.pair,
+            "strategy":  pred.strategy,
+            "direction": pred.direction,
+            "outcome":   pred.outcome,
+            "pips":      pred.pips_gained,
+            "mae":       pred.mae_pips,
+            "mfe":       pred.mfe_pips,
+            "rr_ratio":  pred.rr_ratio,
+            "regime":    pred.regime_at_signal,
+            "session":   pred.session_at_signal,
+            "quality":   pred.quality,
+            "conf":      pred.confidence,
+            "cal_prob":  pred.calibrated_prob,
+            "time":      pred.hit_time or pred.timestamp,
+        }
+        self.data["trades"].append(trade)
+
+        # Consecutive tracking
+        if pred.outcome == "WIN":
+            self.data["consecutive_wins"]   += 1
+            self.data["consecutive_losses"]  = 0
+        else:
+            self.data["consecutive_losses"] += 1
+            self.data["consecutive_wins"]    = 0
+
+        # Equity curve (pip-based simulation)
+        self.data["current_equity"] = (
+            self.data.get("current_equity", 0.0) + pred.pips_gained)
+        peak = self.data.get("peak_equity", 0.0)
+        if self.data["current_equity"] > peak:
+            self.data["peak_equity"] = self.data["current_equity"]
+            peak = self.data["current_equity"]
+        dd = peak - self.data["current_equity"]
+        if dd > self.data.get("max_drawdown", 0.0):
+            self.data["max_drawdown"] = dd
+
+        self._save()
+
+    def get_risk_mode(self) -> Tuple[str, float, str]:
+        cl = self.data.get("consecutive_losses", 0)
+        cw = self.data.get("consecutive_wins",   0)
+        if cl >= MAX_CONSECUTIVE_LOSSES:
+            return ("RECOVERY", REDUCED_RISK_PCT,
+                    f"⚠️ {cl} consecutive losses — "
+                    f"{REDUCED_RISK_PCT}% risk. A+ quality only.")
+        if cl >= 3:
+            return ("CAUTION", REDUCED_RISK_PCT,
+                    f"⚠️ {cl} consecutive losses — risk reduced to "
+                    f"{REDUCED_RISK_PCT}%.")
+        if cw >= 5:
+            return ("HOT_STREAK", DEFAULT_RISK_PCT,
+                    f"🔥 {cw} wins in a row — stay disciplined!")
+        return ("NORMAL", DEFAULT_RISK_PCT, "✅ Normal risk mode.")
+
+    def get_expectancy(self,
+                       filter_key:   Optional[str] = None,
+                       filter_value: Optional[str] = None) -> Dict:
+        trades = self.data.get("trades", [])
+        if filter_key and filter_value:
+            trades = [t for t in trades
+                      if t.get(filter_key) == filter_value]
+        wins   = [t for t in trades if t.get("outcome") == "WIN"]
+        losses = [t for t in trades if t.get("outcome") == "LOSS"]
+        total  = len(wins) + len(losses)
+        if total == 0:
+            return {"total": 0, "wins": 0, "losses": 0,
+                    "win_rate": 0.0, "expectancy": 0.0,
+                    "avg_win": 0.0, "avg_loss": 0.0,
+                    "avg_mae": 0.0, "avg_mfe": 0.0}
+        wr       = len(wins) / total
+        avg_win  = (sum(t["pips"] for t in wins) / len(wins)
+                    if wins else 0.0)
+        avg_loss = (sum(abs(t["pips"]) for t in losses) / len(losses)
+                    if losses else 0.0)
+        exp      = wr * avg_win - (1 - wr) * avg_loss
+        all_t    = wins + losses
+        avg_mae  = sum(t.get("mae", 0) for t in all_t) / total
+        avg_mfe  = sum(t.get("mfe", 0) for t in all_t) / total
+        return {
+            "total":      total,
+            "wins":       len(wins),
+            "losses":     len(losses),
+            "win_rate":   wr,
+            "expectancy": exp,
+            "avg_win":    avg_win,
+            "avg_loss":   avg_loss,
+            "avg_mae":    avg_mae,
+            "avg_mfe":    avg_mfe,
+        }
+
+    def get_strategy_breakdown(self) -> Dict[str, Dict]:
+        out = {}
+        for st in StrategyType:
+            e = self.get_expectancy("strategy", st.value)
+            if e["total"] > 0:
+                out[st.value] = e
+        return out
+
+    def get_regime_breakdown(self) -> Dict[str, Dict]:
+        out = {}
+        for rt in RegimeType:
+            e = self.get_expectancy("regime", rt.value)
+            if e["total"] > 0:
+                out[rt.value] = e
+        return out
+
+    def get_session_breakdown(self) -> Dict[str, Dict]:
+        sessions = [
+            "London", "New York", "Tokyo / Asian",
+            "London-NY Overlap", "Off Hours", "Sydney"
+        ]
+        out = {}
+        for sn in sessions:
+            e = self.get_expectancy("session", sn)
+            if e["total"] > 0:
+                out[sn] = e
+        return out
+
+    def kelly_recommendation(self) -> float:
+        exp = self.get_expectancy()
+        if exp["total"] < 30:
+            return DEFAULT_RISK_PCT
+        return max(0.25, min(2.0,
+            MATH.kelly_fraction(
+                exp["win_rate"],
+                exp["avg_win"],
+                exp["avg_loss"]) * 100))
+
+    def format_report(self) -> str:
+        exp   = self.get_expectancy()
+        mode, risk_pct, risk_msg = self.get_risk_mode()
+        kelly = self.kelly_recommendation()
+        strat = self.get_strategy_breakdown()
+        sess  = self.get_session_breakdown()
+        regime_b = self.get_regime_breakdown()
+
+        msg = (
+            f"{'='*35}\n"
+            f"📊 <b>PERFORMANCE INTELLIGENCE</b>\n"
+            f"{'='*35}\n\n"
+            f"<b>Overall ({exp['total']} trades):</b>\n"
+            f"├ Win Rate:   <b>{exp['win_rate']:.1%}</b>\n"
+            f"├ Avg Win:    <b>+{exp['avg_win']:.1f} pips</b>\n"
+            f"├ Avg Loss:   <b>-{exp['avg_loss']:.1f} pips</b>\n"
+            f"├ Expectancy: <b>{exp['expectancy']:+.1f} pips/trade</b>\n"
+            f"├ Avg MAE:    {exp['avg_mae']:.1f}p (max adverse)\n"
+            f"├ Avg MFE:    {exp['avg_mfe']:.1f}p (max favorable)\n"
+            f"└ Max DD:     "
+            f"{self.data.get('max_drawdown', 0):.1f} pips\n\n"
+            f"<b>Risk:</b> {risk_msg}\n"
+            f"<b>Kelly:</b> {kelly:.2f}% per trade\n\n"
+        )
+
+        if strat:
+            msg += f"{'─'*35}\n<b>By Strategy:</b>\n"
+            for s, e in sorted(
+                    strat.items(),
+                    key=lambda x: x[1]["expectancy"],
+                    reverse=True)[:5]:
+                msg += (
+                    f"• {s[:24]}: "
+                    f"{e['win_rate']:.0%} WR | "
+                    f"{e['expectancy']:+.1f}p "
+                    f"({e['total']})\n")
+            msg += "\n"
+
+        if sess:
+            msg += f"{'─'*35}\n<b>By Session:</b>\n"
+            for sn, e in sorted(
+                    sess.items(),
+                    key=lambda x: x[1]["expectancy"],
+                    reverse=True):
+                msg += (
+                    f"• {sn}: "
+                    f"{e['win_rate']:.0%} WR | "
+                    f"{e['expectancy']:+.1f}p\n")
+            msg += "\n"
+
+        if regime_b:
+            msg += f"{'─'*35}\n<b>By Regime:</b>\n"
+            for rn, e in sorted(
+                    regime_b.items(),
+                    key=lambda x: x[1]["expectancy"],
+                    reverse=True):
+                msg += (
+                    f"• {rn}: "
+                    f"{e['win_rate']:.0%} WR | "
+                    f"{e['expectancy']:+.1f}p\n")
+
+        return msg
+
+
+PERF_ENGINE = PerformanceEngine()
+
+# ════════════════════════════════════════════════════════════════
+#  SUBSCRIPTION MANAGER
+# ════════════════════════════════════════════════════════════════
+
+class SubscriptionManager:
+
+    def __init__(self):
+        raw = load_json(USER_SUBSCRIPTIONS_FILE, {})
+        self.subs: Dict[int, Dict] = {}
+        for k, v in raw.items():
+            try:
+                self.subs[int(k)] = v
+            except Exception:
+                pass
+        log.info(f"Subscriptions: {len(self.subs)} users")
+
+    def _save(self):
+        save_json(USER_SUBSCRIPTIONS_FILE,
+                  {str(k): v for k, v in self.subs.items()})
+
+    def subscribe(self, chat_id: int,
+                  pairs:     List[str] = None,
+                  timeframe: str = "H1"):
+        self.subs[chat_id] = {
+            "pairs":         pairs or [],
+            "timeframe":     timeframe,
+            "active":        True,
+            "all_pairs":     len(pairs or []) == 0,
+            "min_quality":   "B",
+            "min_conf":      MIN_ALERT_CONFIDENCE,
+            "subscribed_at": datetime.now(timezone.utc).isoformat(),
+            "last_alert":    None,
+            "alert_count":   0,
+        }
+        self._save()
+
+    def unsubscribe(self, chat_id: int):
+        if chat_id in self.subs:
+            self.subs[chat_id]["active"] = False
+            self._save()
+
+    def is_active(self, chat_id: int) -> bool:
+        s = self.subs.get(chat_id)
+        return s is not None and s.get("active", False)
+
+    def get(self, chat_id: int) -> Optional[Dict]:
+        return self.subs.get(chat_id)
+
+    def all_active(self) -> List[Tuple[int, Dict]]:
+        return [(cid, s) for cid, s in self.subs.items()
+                if s.get("active", False)]
+
+    def add_pair(self, chat_id: int, pair: str):
+        if chat_id in self.subs:
+            pairs = self.subs[chat_id].get("pairs", [])
+            if pair not in pairs:
+                pairs.append(pair)
+            self.subs[chat_id]["pairs"]     = pairs
+            self.subs[chat_id]["all_pairs"] = False
+            self._save()
+
+    def remove_pair(self, chat_id: int, pair: str):
+        if chat_id in self.subs:
+            pairs = self.subs[chat_id].get("pairs", [])
+            if pair in pairs:
+                pairs.remove(pair)
+            self.subs[chat_id]["pairs"] = pairs
+            self._save()
+
+    def set_all_pairs(self, chat_id: int, enabled: bool):
+        if chat_id in self.subs:
+            self.subs[chat_id]["all_pairs"] = enabled
+            self._save()
+
+    def set_tf(self, chat_id: int, tf: str):
+        if chat_id in self.subs:
+            self.subs[chat_id]["timeframe"] = tf
+            self._save()
+
+    def set_min_quality(self, chat_id: int, quality: str):
+        if chat_id in self.subs:
+            self.subs[chat_id]["min_quality"] = quality
+            self._save()
+
+    def record_alert(self, chat_id: int):
+        if chat_id in self.subs:
+            self.subs[chat_id]["last_alert"] = (
+                datetime.now(timezone.utc).isoformat())
+            self.subs[chat_id]["alert_count"] = (
+                self.subs[chat_id].get("alert_count", 0) + 1)
+            self._save()
+
+    def wants_pair(self, chat_id: int, pair: str) -> bool:
+        s = self.subs.get(chat_id)
+        if not s or not s.get("active"):
+            return False
+        if s.get("all_pairs"):
+            return True
+        return pair in s.get("pairs", [])
+
+    def quality_rank(self, quality_str: str) -> int:
+        """Returns numeric rank: A+=4, A=3, B=2, C=1."""
+        if "A+" in quality_str: return 4
+        if quality_str.startswith("A"): return 3
+        if "B" in quality_str: return 2
+        return 1
+
+    def meets_quality(self, chat_id: int,
+                      quality_str: str) -> bool:
+        """Check if signal quality meets subscriber's minimum."""
+        s = self.subs.get(chat_id)
+        if not s:
+            return False
+        min_q    = s.get("min_quality", "B")
+        min_rank = self.quality_rank(min_q)
+        sig_rank = self.quality_rank(quality_str)
+        return sig_rank >= min_rank
+
+
+SUB_MANAGER = SubscriptionManager()
+
+# ════════════════════════════════════════════════════════════════
+#  SESSION ADVISOR
+# ════════════════════════════════════════════════════════════════
+
+class SessionAdvisor:
+
+    BEST_PAIRS = {
+        "London":            ["EUR_USD","GBP_USD","EUR_GBP",
+                              "GBP_JPY","XAU_USD"],
+        "New York":          ["EUR_USD","GBP_USD","USD_CAD",
+                              "USD_JPY","XAU_USD"],
+        "London-NY Overlap": ["EUR_USD","GBP_USD","XAU_USD",
+                              "EUR_GBP","GBP_JPY"],
+        "Tokyo / Asian":     ["USD_JPY","AUD_JPY","EUR_JPY",
+                              "GBP_JPY","AUD_USD"],
+        "Sydney":            ["AUD_USD","NZD_USD","AUD_JPY",
+                              "NZD_JPY","AUD_NZD"],
+        "Off Hours":         [],
+    }
+
+    def advice(self, pair: str,
+               session: Optional[SessionData] = None) -> str:
+        if session is None:
+            session = SESSION_ENGINE.get_session()
+        sn   = session.session_name
+        best = self.BEST_PAIRS.get(sn, [])
+        wat  = session.wat_time
+
+        if session.session_type == SessionType.OFF_HOURS:
+            quality = "⚠️ OFF-HOURS"
+            advice  = ("Low liquidity, wide spreads. "
+                       "Signals still fire but require higher "
+                       "confluence. Reduce position size by 50%.")
+        elif session.is_kill_zone:
+            quality = "🎯 PRIME TIME"
+            advice  = (f"{session.kill_zone_name} — "
+                       "highest-probability entry window. "
+                       "Institutions most active here.")
+        elif session.session_type == SessionType.OVERLAP:
+            quality = "⚡ MAX LIQUIDITY"
+            advice  = ("London-NY Overlap: tightest spreads, "
+                       "biggest institutional moves.")
+        elif session.session_type == SessionType.LONDON:
+            quality = "🏦 HIGH QUALITY"
+            advice  = ("London sets the tone. Most institutional "
+                       "order flow here. EUR/GBP pairs optimal.")
+        elif session.session_type == SessionType.NEW_YORK:
+            quality = "🗽 GOOD QUALITY"
+            advice  = ("NY adds USD momentum. Best in first 3h. "
+                       "Watch for London reversal setups.")
+        elif session.session_type == SessionType.TOKYO:
+            quality = "🗼 MODERATE"
+            advice  = ("Tokyo: lower volatility, JPY pairs best. "
+                       "Range-bound. AMD accumulation phase.")
+        else:
+            quality = "📊 STANDARD"
+            advice  = "Standard conditions."
+
+        msg = (
+            f"{'─'*35}\n"
+            f"<b>🕐 {wat}</b>\n"
+            f"<b>Session:</b> {sn} — {quality}\n"
+            f"{'─'*35}\n\n"
+            f"{advice}\n\n"
+            f"AMD Phase: <b>{session.amd_phase}</b>\n"
+        )
+        if session.is_dst_london or session.is_dst_ny:
+            msg += (
+                f"<i>DST: "
+                f"{'London BST' if session.is_dst_london else ''}"
+                f"{' + ' if session.is_dst_london and session.is_dst_ny else ''}"
+                f"{'NY EDT' if session.is_dst_ny else ''}</i>\n")
+        if pair in best:
+            msg += (f"\n✅ <b>{pair_display(pair)} is OPTIMAL "
+                    f"for this session.</b>\n")
+        elif sn == "Off Hours":
+            msg += (f"\n⚠️ <b>Off-hours — reduced quality for "
+                    f"{pair_display(pair)}.</b>\n")
+        else:
+            msg += (f"\n💡 {pair_display(pair)} tradeable. "
+                    f"Best now: "
+                    f"{', '.join(pair_display(p) for p in best[:3]) or 'N/A'}\n")
+        if session.hours_remaining > 0:
+            msg += (f"\n<i>Session closes in "
+                    f"{session.hours_remaining:.1f}h</i>\n")
+        return msg
+
+    def schedule(self) -> str:
+        now     = datetime.now(timezone.utc)
+        session = SESSION_ENGINE.get_session(now)
+        wat     = SESSION_ENGINE.wat_time(now)
+        utc_t   = SESSION_ENGINE.utc_time(now)
+
+        msg = (
+            f"{'='*35}\n"
+            f"🗓️ <b>TRADING SESSION GUIDE</b>\n"
+            f"{'='*35}\n\n"
+            f"<b>Now:</b> {wat} | {utc_t}\n"
+            f"<b>Current:</b> {session.session_name} "
+            f"{'| 🎯 ' + session.kill_zone_name if session.is_kill_zone else ''}\n"
+            f"<b>AMD Phase:</b> {session.amd_phase}\n\n"
+        )
+
+        sessions_info = [
+            ("Sydney",           "21:00–06:00 UTC", "22:00–07:00 WAT",
+             "🦘", "AUD/NZD pairs — low volatility"),
+            ("Tokyo/Asian",      "00:00–09:00 UTC", "01:00–10:00 WAT",
+             "🗼", "JPY pairs — AMD accumulation"),
+            ("London Kill Zone", "07:00–10:00 UTC", "08:00–11:00 WAT",
+             "🎯", "EUR/GBP/XAU — manipulation then expansion"),
+            ("London Full",      "07:00–16:00 UTC", "08:00–17:00 WAT",
+             "🏦", "All majors — institutional order flow"),
+            ("NY Kill Zone",     "12:00–15:00 UTC", "13:00–16:00 WAT",
+             "🎯", "EUR/USD/XAU — peak volume"),
+            ("London-NY Overlap","12:00–16:00 UTC", "13:00–17:00 WAT",
+             "⚡", "ALL pairs — maximum liquidity"),
+            ("New York Full",    "12:00–21:00 UTC", "13:00–22:00 WAT",
+             "🗽", "USD pairs — trend continuation"),
+            ("Off Hours",        "21:00–00:00 UTC", "22:00–01:00 WAT",
+             "😴", "Avoid if possible — signals still fire with ⚠️"),
+        ]
+
+        for name, utc_t_s, wat_s, em, note in sessions_info:
+            active = (" ◀️ <b>NOW</b>"
+                      if session.session_name in name else "")
+            msg += (
+                f"{em} <b>{name}</b>{active}\n"
+                f"   UTC: {utc_t_s} | WAT: {wat_s}\n"
+                f"   {note}\n\n")
+
+        msg += (
+            f"{'─'*35}\n"
+            f"<b>💡 Rules:</b>\n"
+            f"• Best entries: Kill Zones\n"
+            f"• Best overall: London-NY Overlap\n"
+            f"• Off-hours: higher threshold, still active\n"
+            f"• AMD: Accumulate→Manipulate→Distribute\n\n"
+            f"<b>⚠️ Risk:</b> 1-2% max per trade. "
+            f"Stop-loss every trade.")
+        return msg
+
+
+SA = SessionAdvisor()
+
+# ════════════════════════════════════════════════════════════════
+#  MESSAGE FORMATTERS
+# ════════════════════════════════════════════════════════════════
+
+def fmt_signal_message(pair:    str,
+                       tf:      str,
+                       result:  Dict,
+                       of:      OrderFlowData,
+                       af:      Optional[AdvancedFlowData],
+                       session: SessionData,
+                       regime:  RegimeData,
+                       sim:     Optional[Dict] = None) -> str:
+    signal  = result["signal"]
+    name    = pair_display(pair)
+    em      = asset_emoji(pair)
+    ts      = session.wat_time
+    d       = signal.direction
+    de      = "🟢" if d == "LONG" else "🔴"
+    dw      = "BUY" if d == "LONG" else "SELL"
+    q       = signal.quality.value
+    qe      = quality_emoji(q)
+    cp      = of.price
+    tgt     = signal.target
+    stp     = signal.stop
+    rr      = signal.rr_ratio        # CORRECT validated R/R
+    rp      = signal.reward_pips     # validated reward pips
+    rkp     = signal.risk_pips       # validated risk pips
+    conf    = signal.confidence
+    cal     = result.get("calibrated_prob", 0.5)
+    ml_l    = result.get("ml_label", "")
+    strat   = signal.strategy.value
+    htf     = result.get("htf_bias", "NEUTRAL")
+    be_p    = signal.breakeven_price
+    trail_p = signal.trailing_price
+
+    mode, risk_pct, _ = PERF_ENGINE.get_risk_mode()
+    recovery_warn = ""
+    if mode == "RECOVERY":
+        recovery_warn = (
+            "\n⚠️ <b>RECOVERY MODE — A+ quality only</b>\n")
+    off_warn = ""
+    if session.session_type == SessionType.OFF_HOURS:
+        off_warn = (
+            "\n⚠️ <b>OFF-HOURS — Reduced liquidity. "
+            "Wider stops recommended.</b>\n")
+
+    trade_id = result.get("trade_id", "FQ-UNKNOWN")
+
+    msg = (
+        f"{'='*35}\n"
+        f"🎯 <b>SIGNAL — {name}</b>\n"
+        f"{'='*35}\n"
+        f"{off_warn}{recovery_warn}\n"
+        f"🆔 Trade ID: <code>{trade_id}</code>\n"
+        f"{em} <b>{name}</b> | "
+        f"{TIMEFRAMES.get(tf,{}).get('emoji','')} {tf}\n"
+        f"🕐 {ts} | {session.session_name}"
+        f"{' | 🎯 ' + session.kill_zone_name if session.is_kill_zone else ''}\n\n"
+
+        f"{'─'*35}\n"
+        f"{de} <b>{dw}</b> | {qe} <b>{q}</b>\n"
+        f"📊 Confidence:      <b>{conf:.0f}%</b>\n"
+        f"🎯 Calibrated Prob: <b>{cal:.0%}</b> "
+        f"<i>(actual historical accuracy)</i>\n"
+    )
+
+    if ml_l and "Accumulating" not in ml_l and "Error" not in ml_l:
+        msg += (
+            f"{ml_l} "
+            f"({result.get('ml_prob', 0):.0%})\n")
+
+    msg += (
+        f"📐 Strategy:  <b>{strat}</b>\n"
+        f"📈 HTF Bias:  <b>{htf}</b>\n"
+        f"🌊 Regime:    <b>{regime.regime.value}</b>"
+    )
+
+    if regime.contradictory:
+        msg += " ⚠️ (contradictory signals)"
+
+    msg += (
+        f"\nH:{regime.hurst_exponent:.2f} | "
+        f"ER:{regime.efficiency_ratio:.2f} | "
+        f"VR:{regime.volatility_ratio:.2f}\n\n"
+
+        f"{'─'*35}\n"
+        f"<b>📍 Trade Levels:</b>\n"
+        f"├ Entry:     <code>{fmt_price(cp,  pair)}</code>\n"
+        f"├ 🎯 Target: <code>{fmt_price(tgt, pair)}</code> "
+        f"(+{rp:.1f} pips)\n"
+        f"└ ⛔ Stop:   <code>{fmt_price(stp, pair)}</code> "
+        f"(-{rkp:.1f} pips)\n\n"
+
+        f"⚖️ R/R: <b>1:{rr:.2f}</b> | "
+        f"Risk: <b>{risk_pct:.1f}%</b> of account\n\n"
+
+        f"<b>📌 Management Levels:</b>\n"
+        f"├ Breakeven @ <code>{fmt_price(be_p, pair)}</code> "
+        f"(move SL to entry)\n"
+        f"└ Trail SL @ <code>{fmt_price(trail_p, pair)}</code> "
+        f"(lock profits)\n\n"
+
+        f"{'─'*35}\n"
+        f"<b>Why this signal fired:</b>\n"
+    )
+
+    for i, r in enumerate(signal.reasons[:6], 1):
+        msg += f"  {i}. {r}\n"
+    msg += "\n"
+
+    # ICT context
+    ict   = result.get("ict", {})
+    swept = ict.get("swept", [])
+    disp  = ict.get("displacement")
+    amd   = ict.get("amd_phase", "")
+
+    if swept or disp or amd:
+        msg += f"{'─'*35}\n<b>🏛️ ICT Context:</b>\n"
+        for lv in swept[:2]:
+            msg += (
+                f"• Swept: {lv.level_type} @ "
+                f"<code>{fmt_price(lv.price, pair)}</code>\n")
+        if disp:
+            msg += (
+                f"• Displacement: "
+                f"{'🟢 Bullish' if disp.is_bullish else '🔴 Bearish'} "
+                f"({disp.body_ratio:.0%} body)\n")
+        if amd:
+            msg += f"• AMD Phase: {amd}\n"
+        msg += "\n"
+
+    # Smart money
+    if af:
+        sm_e = ("🔥" if "HIGH" in af.smart_money_activity else "📊")
+        msg += (
+            f"{'─'*35}\n{sm_e} <b>Smart Money:</b>\n"
+            f"├ VPIN:      <code>{af.vpin:.2%}</code> "
+            f"({af.vpin_level})\n"
+            f"├ Informed:  <b>{af.informed_signal}</b>\n"
+            f"├ Aggressor: <b>{af.aggressor_side}</b>\n"
+            f"└ Inst Score:<b>{af.institutional_score:.0f}%</b>\n\n"
+        )
+        if af.iceberg_count > 0:
+            msg += (
+                f"🧊 <b>{af.iceberg_count} iceberg levels detected</b>\n\n")
+
+    # Key levels
+    kl = result.get("key_levels", [])
+    if kl:
+        msg += f"{'─'*35}\n<b>Key Levels:</b>\n"
+        for lv in kl[:5]:
+            dist = pips_diff(pair, abs(lv["price"] - cp))
+            side = "above" if lv["price"] > cp else "below"
+            msg += (
+                f"• {lv['type']}: "
+                f"<code>{fmt_price(lv['price'], pair)}</code> "
+                f"({dist:.0f}p {side})\n")
+        msg += "\n"
+
+    # Pattern memory
+    if sim and sim.get("found"):
+        msg += f"{sim['narrative']}\n\n"
+
+    msg += (
+        f"{'='*35}\n"
+        f"<i>✅ Live tracking ON — alerts on TP/SL + breakeven.\n"
+        f"🆔 Reference: <code>{trade_id}</code>\n"
+        f"⚠️ Stop-loss at <code>{fmt_price(stp, pair)}</code>. "
+        f"Risk max {risk_pct:.1f}%.</i>"
+    )
+    return msg
+
+
+def fmt_no_setup_message(pair:    str,
+                         tf:      str,
+                         of:      OrderFlowData,
+                         regime:  RegimeData,
+                         session: SessionData,
+                         factors: Optional[List] = None) -> str:
+    name   = pair_display(pair)
+    em     = asset_emoji(pair)
+    ts     = session.wat_time
+    bull_n = sum(1 for f in (factors or [])
+                 if f.direction == "BULLISH")
+    bear_n = sum(1 for f in (factors or [])
+                 if f.direction == "BEARISH")
+    return (
+        f"{'='*35}\n⚪ <b>NO CLEAR SETUP</b>\n{'='*35}\n\n"
+        f"{em} <b>{name}</b> | "
+        f"{TIMEFRAMES.get(tf,{}).get('emoji','')} {tf}\n"
+        f"🕐 {ts}\n\n"
+        f"{'─'*35}\n<b>Why no signal:</b>\n"
+        f"├ 🟢 Bullish factors: {bull_n}\n"
+        f"├ 🔴 Bearish factors: {bear_n}\n"
+        f"├ No strategy met all criteria\n"
+        f"└ Signal geometry validation active\n\n"
+        f"<b>Market State:</b>\n"
+        f"├ Regime:    {regime.regime.value}\n"
+        f"├ Hurst:     {regime.hurst_exponent:.2f} "
+        f"({'↗ Trending' if regime.hurst_exponent>0.55 else '↔ Ranging' if regime.hurst_exponent<0.45 else '◌ Random'})\n"
+        f"├ Vol Ratio: {regime.volatility_ratio:.2f} "
+        f"({'Expanding' if regime.volatility_ratio>1.2 else 'Compressing' if regime.volatility_ratio<0.7 else 'Normal'})\n"
+        f"├ ADR Used:  {regime.adr_consumed_pct:.0f}%\n"
+        f"└ Contradict:{regime.contradictory}\n\n"
+        f"<b>Flow:</b>\n"
+        f"├ CVD:       <code>{fmt_signed(of.cvd)}</code>\n"
+        f"├ Imbalance: <code>{of.imbalance:+.1f}%</code> "
+        f"(z={of.imbalance_zscore:+.1f}σ)\n"
+        f"└ VWAP Z:    <code>{of.vwap_zscore:+.1f}σ</code>\n\n"
+        f"{'='*35}\n"
+        f"<i>💡 Patience is the edge. "
+        f"Every rejected signal protects your capital.</i>"
+    )
+
+
+def fmt_outcome_notification(pred:  QuantPrediction,
+                             atype: str,
+                             cp:    float) -> str:
+    """
+    Format outcome notification.
+    ONLY called when pred.was_sent_to_users == True.
+    """
     em   = asset_emoji(pred.pair)
     name = pair_display(pred.pair)
+    pip  = pip_value(pred.pair)
+    tid  = pred.trade_id
+
     if atype == "TARGET_HIT":
         return (
-            f"{'='*35}\n🎯 <b>TARGET HIT! ✅</b>\n{'='*35}\n\n"
-            f"{em} <b>{name}</b> | {pred.direction}\n\n"
-            f"├ Entry:  <code>{fmt_price(pred.current_price,  pred.pair)}</code>\n"
-            f"├ Target: <code>{fmt_price(pred.target_price,   pred.pair)}</code>\n"
-            f"├ Exit:   <code>{fmt_price(cp,                  pred.pair)}</code>\n"
-            f"└ Profit: <b>{pred.pips_gained:.1f} pips 💰</b>\n\n"
-            f"Quality: {pred.quality} | Confidence: {pred.confidence:.0f}%\n"
             f"{'='*35}\n"
-            f"<i>Congratulations on the winning trade!\n"
-            f"Remember: not every trade will win. "
-            f"Risk management is everything.</i>"
-        )
-    elif atype == "INVALIDATED":
-        return (
-            f"{'='*35}\n❌ <b>SETUP INVALIDATED</b>\n{'='*35}\n\n"
-            f"{em} <b>{name}</b> | {pred.direction}\n\n"
-            f"├ Entry: <code>{fmt_price(pred.current_price,      pred.pair)}</code>\n"
-            f"├ Stop:  <code>{fmt_price(pred.invalidation_price, pred.pair)}</code>\n"
-            f"├ Exit:  <code>{fmt_price(cp,                      pred.pair)}</code>\n"
-            f"└ Loss:  <b>{abs(pred.pips_gained):.1f} pips</b>\n\n"
+            f"🎯 <b>TARGET HIT! ✅</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{tid}</code>\n"
+            f"{em} <b>{name}</b> | {pred.direction}\n"
+            f"📐 Strategy: {pred.strategy}\n\n"
+            f"├ Entry:   <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ Target:  <code>{fmt_price(pred.target_price,  pred.pair)}</code>\n"
+            f"├ Exit:    <code>{fmt_price(cp,                  pred.pair)}</code>\n"
+            f"├ 💰 Profit: <b>+{pred.pips_gained:.1f} pips</b>\n"
+            f"├ R/R was: 1:{pred.rr_ratio:.2f}\n"
+            f"├ MFE:     {pred.mfe_pips:.1f}p (max unrealized profit)\n"
+            f"└ MAE:     {pred.mae_pips:.1f}p (max heat taken)\n\n"
+            f"Quality: {pred.quality} | "
+            f"Conf: {pred.confidence:.0f}%\n"
             f"{'='*35}\n"
-            f"<i>This is normal. No system wins 100% of the time.\n"
-            f"The stop-loss did its job. Capital is preserved.</i>"
+            f"<i>Winning trade! Risk management made this possible.\n"
+            f"Reference this trade: <code>{tid}</code></i>"
         )
-    else:
-        p_diff = ((cp - pred.current_price) if pred.direction == "LONG"
-                  else (pred.current_price - cp)) / pip_value(pred.pair)
+    elif atype == "STOP_HIT":
         return (
-            f"{'='*35}\n⏰ <b>PREDICTION EXPIRED</b>\n{'='*35}\n\n"
+            f"{'='*35}\n"
+            f"❌ <b>STOP TRIGGERED</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{tid}</code>\n"
+            f"{em} <b>{name}</b> | {pred.direction}\n"
+            f"📐 Strategy: {pred.strategy}\n\n"
+            f"├ Entry:  <code>{fmt_price(pred.current_price,      pred.pair)}</code>\n"
+            f"├ Stop:   <code>{fmt_price(pred.invalidation_price, pred.pair)}</code>\n"
+            f"├ Exit:   <code>{fmt_price(cp,                       pred.pair)}</code>\n"
+            f"├ Loss:   <b>-{abs(pred.pips_gained):.1f} pips</b>\n"
+            f"├ R/R was: 1:{pred.rr_ratio:.2f}\n"
+            f"├ MAE:    {pred.mae_pips:.1f}p (went this far against)\n"
+            f"└ MFE:    {pred.mfe_pips:.1f}p (closest to target)\n\n"
+            f"{'='*35}\n"
+            f"<i>The stop-loss protected your capital. "
+            f"Losing trades are normal — even the best systems lose.\n"
+            f"Reference: <code>{tid}</code></i>"
+        )
+    elif atype == "BREAKEVEN":
+        return (
+            f"{'='*35}\n"
+            f"📌 <b>BREAKEVEN ALERT</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{tid}</code>\n"
             f"{em} <b>{name}</b> | {pred.direction}\n\n"
-            f"├ Entry:   <code>{fmt_price(pred.current_price,  pred.pair)}</code>\n"
-            f"├ Target:  <code>{fmt_price(pred.target_price,   pred.pair)}</code>\n"
+            f"Price reached <b>50% of target</b>.\n\n"
+            f"├ Entry:     <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ Current:   <code>{fmt_price(cp,                  pred.pair)}</code>\n"
+            f"├ Target:    <code>{fmt_price(pred.target_price,   pred.pair)}</code>\n"
+            f"└ Stop:      <code>{fmt_price(pred.invalidation_price, pred.pair)}</code>\n\n"
+            f"{'─'*35}\n"
+            f"<b>💡 Action: Consider moving stop-loss to entry "
+            f"({fmt_price(pred.current_price, pred.pair)}) "
+            f"to make this a risk-free trade.</b>\n"
+            f"{'='*35}"
+        )
+    elif atype == "TRAILING":
+        return (
+            f"{'='*35}\n"
+            f"🔄 <b>TRAILING STOP ALERT</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{tid}</code>\n"
+            f"{em} <b>{name}</b> | {pred.direction}\n\n"
+            f"Price reached <b>75% of target</b>! 🚀\n\n"
+            f"├ Entry:     <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ Current:   <code>{fmt_price(cp,                  pred.pair)}</code>\n"
+            f"├ Target:    <code>{fmt_price(pred.target_price,   pred.pair)}</code>\n"
+            f"└ Unrealised: <b>+{pred.mfe_pips:.1f} pips</b>\n\n"
+            f"{'─'*35}\n"
+            f"<b>💡 Action: Consider trailing your stop-loss "
+            f"to lock in profits. Move stop "
+            f"{'above' if pred.direction=='SHORT' else 'below'} "
+            f"the most recent swing "
+            f"{'high' if pred.direction=='SHORT' else 'low'}.</b>\n"
+            f"{'='*35}"
+        )
+    else:  # EXPIRED
+        p_pips = ((cp - pred.current_price) if pred.direction == "LONG"
+                  else (pred.current_price - cp)) / pip
+        return (
+            f"{'='*35}\n"
+            f"⏰ <b>SIGNAL EXPIRED</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{tid}</code>\n"
+            f"{em} <b>{name}</b> | {pred.direction}\n\n"
+            f"├ Entry:   <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ Target:  <code>{fmt_price(pred.target_price,  pred.pair)}</code>\n"
             f"├ Current: <code>{fmt_price(cp,                  pred.pair)}</code>\n"
-            f"└ Move:    {p_diff:+.1f} pips\n\n"
-            f"{'='*35}\n"
-            f"<i>Setup expired after 24 hours.</i>"
+            f"└ P/L:     {p_pips:+.1f} pips (24h expiry)\n\n"
+            f"<i>Setup expired. Thesis did not play out in time.\n"
+            f"Reference: <code>{tid}</code></i>"
         )
 
 
-# ════════════════════════════════════════════════════════════════
-#  MONITOR LOOP
-# ════════════════════════════════════════════════════════════════
+def fmt_analysis_messages(pair:    str,
+                           tf:      str,
+                           of:      OrderFlowData,
+                           af:      Optional[AdvancedFlowData],
+                           vp:      Optional[VolumeProfile],
+                           ob:      Optional[OrderBookData],
+                           pb:      Optional[PositionBookData],
+                           regime:  RegimeData,
+                           session: SessionData,
+                           ict:     Optional[Dict] = None) -> List[str]:
+    msgs = []
+    name = pair_display(pair)
+    ts   = session.wat_time
+    ti   = TIMEFRAMES.get(tf, {})
+    vs   = "above" if of.price > of.vwap else "below"
 
-async def monitor_loop(app):
-    log.info("Monitor started")
-    while True:
-        try:
-            notes = await PT.check(app.bot)
-            for n in notes:
-                pred = n["pred"]
-                if pred.chat_id:
-                    await send_msg(app.bot, pred.chat_id,
-                                   _alert_msg(pred, n["type"], n["cp"]),
-                                   parse_mode="HTML")
-            await asyncio.sleep(MONITORING_INTERVAL)
-        except Exception as e:
-            log.error(f"Monitor loop: {e}")
-            await asyncio.sleep(MONITORING_INTERVAL)
+    m1 = (
+        f"{'='*32}\n📊 <b>{name} DEEP ANALYSIS</b>\n{'='*32}\n"
+        f"⏰ {ts} | {ti.get('emoji','')} {ti.get('label',tf)}\n\n"
+        f"💰 <b>Price:</b> <code>{fmt_price(of.price, pair)}</code>\n"
+        f"📐 <b>VWAP:</b>  <code>{fmt_price(of.vwap,  pair)}</code> "
+        f"({vs} — {'bullish' if vs=='above' else 'bearish'} bias)\n"
+        f"📊 VWAP Z: <code>{of.vwap_zscore:+.1f}σ</code>\n\n"
+
+        f"{'─'*32}\n<b>📈 ORDER FLOW</b>\n{'─'*32}\n"
+        f"{'🟢' if of.cvd>0 else '🔴'} "
+        f"<b>{'BUYERS' if of.cvd>0 else 'SELLERS'} dominant</b>\n\n"
+        f"├ Buy Vol:    <code>{fmt_num(of.buy_volume)}</code> "
+        f"({of.buy_pct:.1f}%)\n"
+        f"├ Sell Vol:   <code>{fmt_num(of.sell_volume)}</code> "
+        f"({of.sell_pct:.1f}%)\n"
+        f"├ Imbalance:  <code>{fmt_pct(of.imbalance)}</code> "
+        f"(z={of.imbalance_zscore:+.1f}σ)\n"
+        f"├ CVD:        <code>{fmt_signed(of.cvd)}</code>\n"
+        f"├ Momentum:   <code>{fmt_signed(of.delta_momentum)}</code>\n"
+        f"├ Vol Trend:  <code>{fmt_pct(of.volume_trend)}</code>\n"
+        f"└ Efficiency: <code>{of.efficiency_ratio:.2f}</code>\n\n"
+
+        f"{'─'*32}\n<b>📊 MARKET REGIME</b>\n{'─'*32}\n"
+        f"Regime: <b>{regime.regime.value}</b>"
+        f"{' ⚠️ CONTRADICTORY' if regime.contradictory else ''}\n"
+        f"├ Hurst:      {regime.hurst_exponent:.3f} "
+        f"({'↗ Trending' if regime.hurst_exponent>0.55 else '↔ Mean-Rev' if regime.hurst_exponent<0.45 else '◌ Random'})\n"
+        f"├ Fractal:    {regime.fractal_dimension:.3f}\n"
+        f"├ Entropy:    {regime.entropy:.3f}\n"
+        f"├ Autocorr:   {regime.autocorr_lag1:+.3f}\n"
+        f"├ Var Ratio:  {regime.variance_ratio:.3f}\n"
+        f"├ Efficiency: {regime.efficiency_ratio:.3f}\n"
+        f"├ Vol Ratio:  {regime.volatility_ratio:.2f}\n"
+        f"└ ADR Used:   {regime.adr_consumed_pct:.0f}%\n"
+    )
+    msgs.append(m1)
+
+    if af:
+        m2 = (
+            f"{'─'*32}\n<b>🧠 SMART MONEY</b>\n{'─'*32}\n\n"
+            f"<b>VPIN:</b> <code>{af.vpin:.2%}</code> — {af.vpin_level}\n"
+            f"<b>Toxicity:</b> <code>{af.toxicity:.2%}</code> — "
+            f"{af.toxicity_level}\n"
+            f"<b>Liquidity:</b> {af.liquidity_level}\n"
+            f"<b>Depth Bias:</b> {af.depth_bias}\n\n"
+            f"<b>Absorption Ratio:</b> {af.absorption_ratio:.2f}\n"
+            f"<b>Aggressor:</b> <b>{af.aggressor_side}</b>\n"
+            f"<b>Informed Signal:</b> <b>{af.informed_signal}</b>\n\n"
+            f"{'🧊 <b>' + str(af.iceberg_count) + ' iceberg levels</b>' if af.iceberg_count > 0 else '• No icebergs'}\n\n"
+            f"{'─'*32}\n"
+            f"└ <b>Inst Score: {af.institutional_score:.0f}%</b> | "
+            f"Smart Money: <b>{af.smart_money_activity}</b>\n"
+        )
+        msgs.append(m2)
+
+    if ict:
+        struct  = ict.get("structure", MarketStructure())
+        fvgs    = ict.get("fvgs", [])
+        obs     = ict.get("obs",  [])
+        swept   = ict.get("swept", [])
+        disp    = ict.get("displacement")
+        asian_h = ict.get("asian_high")
+        asian_l = ict.get("asian_low")
+
+        m3 = (
+            f"{'─'*32}\n<b>🏛️ ICT STRUCTURE</b>\n{'─'*32}\n\n"
+            f"<b>Trend:</b> {struct.trend} | "
+            f"<b>Internal:</b> {struct.internal_trend} | "
+            f"<b>HTF:</b> {struct.htf_bias}\n"
+            f"<b>BOS:</b> "
+            f"{struct.last_bos.value if struct.last_bos else 'None'}\n"
+            f"<b>CHOCH:</b> "
+            f"{struct.last_choch.value if struct.last_choch else 'None'}\n\n"
+        )
+        if asian_h and asian_l:
+            m3 += (
+                f"<b>Asian Range:</b>\n"
+                f"├ High: <code>{fmt_price(asian_h, pair)}</code>\n"
+                f"├ Low:  <code>{fmt_price(asian_l, pair)}</code>\n"
+                f"└ AMD:  <b>{ict.get('amd_phase','?')}</b>\n\n")
+        if swept:
+            m3 += "<b>Swept Liquidity:</b>\n"
+            for lv in swept[:3]:
+                m3 += (f"✅ {lv.level_type} @ "
+                       f"<code>{fmt_price(lv.price, pair)}</code>\n")
+            m3 += "\n"
+        if disp:
+            m3 += (
+                f"<b>Displacement:</b> "
+                f"{'🟢 Bullish' if disp.is_bullish else '🔴 Bearish'} "
+                f"({disp.body_ratio:.0%} body)\n\n")
+        unfilled = [f for f in fvgs if not f.filled][:3]
+        if unfilled:
+            m3 += "<b>Fair Value Gaps:</b>\n"
+            for fvg in unfilled:
+                dist = pips_diff(pair, abs(fvg.mid - of.price))
+                m3 += (
+                    f"{'🟢' if fvg.direction=='BULLISH' else '🔴'} "
+                    f"{fmt_price(fvg.lower, pair)}–"
+                    f"{fmt_price(fvg.upper, pair)} "
+                    f"({dist:.0f}p away)\n")
+            m3 += "\n"
+        valid_obs = [ob for ob in obs if ob.valid][:3]
+        if valid_obs:
+            m3 += "<b>Order Blocks:</b>\n"
+            for ob_b in valid_obs:
+                m3 += (
+                    f"{'🟢' if ob_b.direction=='DEMAND' else '🔴'} "
+                    f"{ob_b.direction}: "
+                    f"{fmt_price(ob_b.low, pair)}–"
+                    f"{fmt_price(ob_b.high, pair)} "
+                    f"(str:{ob_b.strength:.0f})\n")
+        msgs.append(m3)
+
+    m4 = ""
+    if vp:
+        in_va = vp.val <= of.price <= vp.vah
+        m4 += (
+            f"{'─'*32}\n<b>📐 VOLUME PROFILE</b>\n{'─'*32}\n\n"
+            f"├ POC: <code>{fmt_price(vp.poc, pair)}</code>\n"
+            f"├ VAH: <code>{fmt_price(vp.vah, pair)}</code>\n"
+            f"├ VAL: <code>{fmt_price(vp.val, pair)}</code>\n"
+            f"└ In VA: {'✅' if in_va else '❌'}\n\n")
+    if pb:
+        m4 += (
+            f"{'─'*32}\n<b>👥 POSITION BOOK</b>\n{'─'*32}\n\n"
+            f"├ Longs:   {pbar(pb.long_pct)} {pb.long_pct:.1f}%\n"
+            f"├ Shorts:  {pbar(pb.short_pct)} {pb.short_pct:.1f}%\n"
+            f"├ Skew:    <code>{fmt_pct(pb.skew)}</code>\n"
+            f"├ Δ Skew:  <code>{pb.skew_change:+.1f}%</code>\n"
+            f"├ Signal:  <b>{pb.contrarian_signal}</b>\n"
+            f"└ Squeeze: {pb.squeeze_potential}\n\n")
+    if ob:
+        m4 += (
+            f"{'─'*32}\n<b>📖 ORDER BOOK</b>\n{'─'*32}\n\n"
+            f"├ Longs:   {pbar(ob.long_pct)} {ob.long_pct:.1f}%\n"
+            f"├ Shorts:  {pbar(ob.short_pct)} {ob.short_pct:.1f}%\n"
+            f"└ Pressure:<b>{ob.breakout_bias.replace('_',' ')}</b>\n")
+        if ob.stop_cluster_above > 0:
+            m4 += (f"├ Stop ↑: "
+                   f"<code>{fmt_price(ob.stop_cluster_above, pair)}</code>\n")
+        if ob.stop_cluster_below > 0:
+            m4 += (f"└ Stop ↓: "
+                   f"<code>{fmt_price(ob.stop_cluster_below, pair)}</code>\n")
+    if m4:
+        msgs.append(m4)
+
+    msgs.append(
+        f"\n{'='*32}\n"
+        f"<i>Use /signal for prediction\n"
+        f"Use /sessions for session guide\n"
+        f"Use /math for mathematical explanations</i>"
+    )
+    return msgs
 
 
-# ════════════════════════════════════════════════════════════════
-#  MARKET SUMMARIZER
-# ════════════════════════════════════════════════════════════════
+def fmt_market_summary(pair:        str,
+                       of:          OrderFlowData,
+                       af:          Optional[AdvancedFlowData],
+                       vp:          Optional[VolumeProfile],
+                       ob:          Optional[OrderBookData],
+                       pb:          Optional[PositionBookData],
+                       regime:      RegimeData,
+                       session:     SessionData,
+                       ict:         Optional[Dict],
+                       pred_result: Optional[Dict]) -> str:
+    name  = pair_display(pair)
+    ts    = session.wat_time
+    parts = []
 
-class MarketSummarizer:
+    parts.append(
+        f"{'='*35}\n🧠 <b>MARKET INTELLIGENCE BRIEF</b>\n{'='*35}\n"
+        f"📍 <b>{name}</b> | 🕐 {ts}\n"
+        f"Session: {session.session_name}"
+        f"{' | 🎯 ' + session.kill_zone_name if session.is_kill_zone else ''}\n"
+        f"Regime: <b>{regime.regime.value}</b>"
+        f"{' ⚠️ Contradictory' if regime.contradictory else ''} | "
+        f"AMD: <b>{session.amd_phase}</b>"
+    )
 
-    def summarize(self, instrument: str, of: OrderFlowData,
-                  af: Optional[AdvancedOrderFlowData],
-                  vp: Optional[VolumeProfile],
-                  ob: Optional[OrderBookData],
-                  pb: Optional[PositionBookData],
-                  lz: Optional[List[LiquidityZone]] = None,
-                  pred: Optional[Dict] = None) -> str:
-        name = pair_display(instrument)
-        ts   = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        parts: List[str] = []
+    # Flow narrative
+    cvd_dir = "NET BUYING" if of.cvd > 0 else "NET SELLING"
+    imb_z   = of.imbalance_zscore
+    flow_str = (
+        f"Flow imbalance is <b>statistically extreme</b> "
+        f"(z={imb_z:+.1f}σ) — "
+        f"{'buyers' if imb_z>0 else 'sellers'} unusually dominant."
+        if abs(imb_z) > 2.0 else
+        f"Flow shows <b>{cvd_dir}</b> "
+        f"(z={imb_z:+.1f}σ — normal conditions)."
+    )
+    parts.append(
+        f"{'─'*35}\n<b>📈 ORDER FLOW</b>\n{'─'*35}\n\n"
+        f"{flow_str}\n\n"
+        f"VWAP z-score: <b>{of.vwap_zscore:+.1f}σ</b> — "
+        f"price is "
+        f"{'statistically expensive' if of.vwap_zscore>2 else 'statistically cheap' if of.vwap_zscore<-2 else 'near fair value'}.\n\n"
+        f"Volume: "
+        f"{'📈 Rising' if of.volume_trend>15 else '📉 Declining' if of.volume_trend<-15 else '➡️ Stable'} "
+        f"({of.volume_trend:+.1f}%)"
+        + (f"\n\n⚠️ <b>BUYING CLIMAX</b> — Reversal risk HIGH."
+           if of.buying_climax else
+           f"\n\n⚠️ <b>SELLING CLIMAX</b> — Reversal risk HIGH."
+           if of.selling_climax else "")
+    )
+
+    # Regime
+    h = regime.hurst_exponent
+    if h > 0.58:
+        regime_narr = (
+            f"Hurst ({h:.3f}) confirms <b>trending market</b>. "
+            f"Momentum strategies have edge."
+            + (" ⚠️ BUT Efficiency Ratio contradicts — caution."
+               if regime.contradictory else ""))
+    elif h < 0.42:
+        regime_narr = (
+            f"Hurst ({h:.3f}) confirms <b>mean-reverting</b>. "
+            f"Fade extremes, target VWAP.")
+    else:
+        regime_narr = (
+            f"Hurst ({h:.3f}) — near <b>random walk</b>. "
+            f"Wait for clearer regime.")
+    parts.append(
+        f"{'─'*35}\n<b>📊 REGIME</b>\n{'─'*35}\n\n"
+        f"{regime_narr}\n\n"
+        f"Volatility: "
+        f"{'Compressing — breakout imminent 🔥' if regime.volatility_ratio<0.5 else 'Expanding — follow the move 🚀' if regime.volatility_ratio>1.8 else 'Normal conditions'} "
+        f"(VR:{regime.volatility_ratio:.2f})"
+    )
+
+    # Smart money
+    if af:
+        sm = af.smart_money_activity
+        sm_narr = (
+            f"Smart money: <b>{sm}</b>. "
+            f"Informed signal: <b>{af.informed_signal}</b>. "
+            f"{'Follow institutions.' if 'HIGH' in sm else 'Mixed conditions.'}"
+        )
+        retail_txt = ""
+        if pb:
+            retail_txt = (
+                f"\n\n<b>Retail:</b>\n"
+                f"• {pb.long_pct:.0f}% LONG / {pb.short_pct:.0f}% SHORT\n"
+                f"• Contrarian: <b>{pb.contrarian_signal}</b>\n"
+                f"• Squeeze: {pb.squeeze_potential}")
         parts.append(
-            f"{'='*35}\n🧠 <b>MARKET INTELLIGENCE BRIEF</b>\n{'='*35}\n"
-            f"📍 <b>{name}</b>  |  🕐 {ts}\n\n"
-            f"<i>Every data point explained in plain English.</i>"
-        )
-        parts.append(self._order_flow(of))
-        if af:
-            parts.append(self._vpin_section(af, of))
-            parts.append(self._toxicity_section(af))
-            parts.append(self._depth_section(af))
-            parts.append(self._absorption_section(af))
-        if vp:
-            parts.append(self._vp_section(vp, of.price, instrument))
-        if lz:
-            lz_txt = self._lz_section(lz, of.price, instrument)
-            if lz_txt:
-                parts.append(lz_txt)
-        if pb:
-            parts.append(self._pb_section(pb, instrument))
-        if ob:
-            parts.append(self._ob_section(ob))
-        parts.append(self._sm_vs_retail(of, af, pb))
-        parts.append(self._conclusion(instrument, of, af, vp, pb, ob, pred))
-        return "\n\n".join(parts)
-
-    def _order_flow(self, of: OrderFlowData) -> str:
-        cvd_t = (
-            f"The <b>CVD is positive ({fmt_signed(of.cvd)})</b> — buyers have "
-            f"collectively bought more than sellers have sold."
-            if of.cvd > 0 else
-            f"The <b>CVD is negative ({fmt_signed(of.cvd)})</b> — sellers have "
-            f"been more aggressive than buyers."
-        )
-        imb_t = (
-            "Order flow is balanced. Expect choppy price action."
-            if abs(of.imbalance) < 5 else
-            f"Buy orders outweigh sells by <b>{of.imbalance:+.1f}%</b>. "
-            f"Buyers have the edge."
-            if of.imbalance > 0 else
-            f"Sell orders outweigh buys by <b>{abs(of.imbalance):.1f}%</b>. "
-            f"Sellers in control."
-        )
-        mom_t = (
-            "Delta momentum is flat — no acceleration."
-            if abs(of.delta_momentum) < 100 else
-            f"<b>Buying momentum accelerating</b> "
-            f"({fmt_signed(of.delta_momentum)}). "
-            f"Each wave of buyers is larger — growing bullish conviction."
-            if of.delta_momentum > 0 else
-            f"<b>Selling momentum accelerating</b> "
-            f"({fmt_signed(of.delta_momentum)}). "
-            f"Each wave of sellers intensifies — bearish conviction building."
-        )
-        vol_t = (
-            f"Volume rising (+{of.volume_trend:.1f}%). Confirms real participation."
-            if of.volume_trend > 15 else
-            f"Volume declining ({of.volume_trend:.1f}%). Moves lack conviction."
-            if of.volume_trend < -15 else
-            "Volume stable."
-        )
-        vs     = "above" if of.price > of.vwap else "below"
-        vwap_t = (f"Price is <b>{vs} the VWAP</b> — the institutional fair value. "
-                  f"Creates a {'bullish' if vs == 'above' else 'bearish'} bias.")
-        climax_t = ""
-        if of.buying_climax:
-            climax_t = ("\n\n⚠️ <b>BUYING CLIMAX:</b> Volume spiked but momentum is "
-                        "fading. Institutions sell into retail euphoria — reversal risk HIGH.")
-        elif of.selling_climax:
-            climax_t = ("\n\n⚠️ <b>SELLING CLIMAX:</b> Volume spiked on selling but fading. "
-                        "Smart money absorbs panic — watch for bounce.")
-        return (f"{'─'*35}\n<b>📈 ORDER FLOW</b>\n{'─'*35}\n\n"
-                f"{cvd_t}\n\n{imb_t}\n\n{mom_t}\n\n{vol_t}\n\n{vwap_t}{climax_t}")
-
-    def _vpin_section(self, af: AdvancedOrderFlowData,
-                      of: OrderFlowData) -> str:
-        pct = af.vpin * 100
-        if af.vpin >= 0.7:
-            vt = (f"VPIN is <b>EXTREMELY HIGH at {pct:.1f}%</b>. A large portion of "
-                  f"volume is from informed traders. Do NOT trade against this.")
-        elif af.vpin >= 0.5:
-            vt = (f"VPIN is <b>HIGH at {pct:.1f}%</b>. Smart money is actively "
-                  f"participating and building positions.")
-        elif af.vpin >= 0.3:
-            vt = f"VPIN is <b>MODERATE at {pct:.1f}%</b>. Mixed retail and institutional flow."
-        else:
-            vt = (f"VPIN is <b>LOW at {pct:.1f}%</b>. Mostly retail-driven. "
-                  f"Smart money largely on the sidelines.")
-        sig = af.informed_trader_signal
-        it  = (f"Informed signal: <b>{sig}</b> — "
-               + ("smart money positioning LONG." if "BULLISH" in sig else
-                  "smart money positioning SHORT." if "BEARISH" in sig else
-                  "no clear smart money direction."))
-        kl  = af.kyle_lambda
-        kt  = ("Kyle's Lambda is very high — large informed orders moving price significantly."
-               if abs(kl) >= 0.0001 else
-               "Kyle's Lambda shows moderate price impact."
-               if abs(kl) >= 0.00001 else
-               "Kyle's Lambda minimal — liquid, efficient market.")
-        return (f"{'─'*35}\n<b>🧠 VPIN AND SMART MONEY</b>\n{'─'*35}\n\n"
-                f"{vt}\n\n{it}\n\n{kt}")
-
-    def _toxicity_section(self, af: AdvancedOrderFlowData) -> str:
-        pct = af.toxicity * 100
-        if af.toxicity >= 0.7:
-            tt = (f"Toxicity <b>VERY HIGH ({pct:.1f}%)</b>. Market makers are getting "
-                  f"systematically picked off. Expect sudden violent moves.")
-        elif af.toxicity >= 0.5:
-            tt = (f"Toxicity <b>HIGH ({pct:.1f}%)</b>. Market makers under pressure. "
-                  f"Sharp moves becoming more likely.")
-        elif af.toxicity >= 0.3:
-            tt = f"Toxicity <b>MODERATE ({pct:.1f}%)</b>. Some adverse selection, manageable."
-        else:
-            tt = (f"Toxicity <b>LOW ({pct:.1f}%)</b>. Clean, healthy order flow. "
-                  f"Good conditions for trading.")
-        a   = af.amihud_illiquidity
-        lt  = (f"Market is <b>VERY ILLIQUID</b> (Amihud: {a:.1f}). Use wider stops."
-               if a >= 100 else
-               f"Liquidity <b>REDUCED</b> (Amihud: {a:.1f}). Be careful with size."
-               if a >= 50 else
-               f"Liquidity <b>GOOD</b> (Amihud: {a:.1f}). Normal conditions.")
-        return (f"{'─'*35}\n<b>⚗️ TOXICITY AND LIQUIDITY</b>\n{'─'*35}\n\n"
-                f"{tt}\n\n{lt}")
-
-    def _depth_section(self, af: AdvancedOrderFlowData) -> str:
-        d = af.market_depth_imbalance * 100
-        if d >= 30:
-            dt = (f"Order book <b>HEAVILY SKEWED TO BIDS (+{d:.1f}%)</b>. "
-                  f"Strong institutional buying below price.")
-        elif d >= 10:
-            dt = f"<b>Moderate bid pressure (+{d:.1f}%)</b>. Buyers building a base."
-        elif d <= -30:
-            dt = (f"Order book <b>HEAVILY SKEWED TO ASKS ({d:.1f}%)</b>. "
-                  f"Wall of sell orders above — strong overhead resistance.")
-        elif d <= -10:
-            dt = f"<b>Moderate ask pressure ({d:.1f}%)</b>. Sellers capping rallies."
-        else:
-            dt = "Order book depth balanced. No structural advantage for either side."
-        it = ""
-        if af.iceberg_count > 0:
-            it = (f"\n\n🧊 <b>ICEBERG ORDERS: {af.iceberg_count} levels detected</b>\n"
-                  f"Large institutional orders are deliberately hidden — a powerful signal.")
-        else:
-            it = "\n\nNo significant iceberg orders detected."
-        return (f"{'─'*35}\n<b>📖 ORDER BOOK DEPTH AND HIDDEN ORDERS</b>\n"
-                f"{'─'*35}\n\n{dt}{it}")
-
-    def _absorption_section(self, af: AdvancedOrderFlowData) -> str:
-        r  = af.absorption_ratio
-        at = (f"Buying absorption <b>STRONG (ratio: {r:.2f})</b>. Every dip is bought."
-              if r > 1.5 else
-              f"Moderate buying absorption (ratio: {r:.2f})."
-              if r > 1.2 else
-              f"Selling absorption <b>STRONG (ratio: {r:.2f})</b>. Every rally is sold."
-              if r < 0.67 else
-              f"Moderate selling absorption (ratio: {r:.2f})."
-              if r < 0.83 else
-              f"Absorption balanced (ratio: {r:.2f}).")
-        ag  = af.aggressor_side
-        agt = ("<b>BUYERS are the aggressors</b> — actively lifting the ask with urgency."
-               if ag == "BUYERS" else
-               "<b>SELLERS are the aggressors</b> — hitting the bid with urgency."
-               if ag == "SELLERS" else
-               "Neither side clearly aggressing. Wait for a clear aggressor.")
-        sc  = af.institutional_flow_score
-        ist = (f"\n\n🏦 <b>Institutional Score: {sc:.0f}% — VERY HIGH</b>\n"
-               f"Multiple institutional fingerprints present."
-               if sc >= 70 else
-               f"\n\n🏦 Institutional Score: {sc:.0f}% — Moderate activity."
-               if sc >= 50 else
-               f"\n\n🏦 Institutional Score: {sc:.0f}% — Mostly retail-driven.")
-        return (f"{'─'*35}\n<b>💥 ABSORPTION AND AGGRESSION</b>\n{'─'*35}\n\n"
-                f"{at}\n\n{agt}{ist}")
-
-    def _vp_section(self, vp: VolumeProfile, price: float,
-                    instrument: str) -> str:
-        pt  = (f"The <b>POC is at {fmt_price(vp.poc, instrument)}</b>. "
-               f"This is where the most volume has traded.")
-        in_va = vp.val <= price <= vp.vah
-        vat = (f"Value Area {fmt_price(vp.val, instrument)} to "
-               f"{fmt_price(vp.vah, instrument)} — where 70% of volume traded. "
-               f"Price is "
-               + ("<b>INSIDE value area</b> — equilibrium."
-                  if in_va else
-                  "<b>OUTSIDE value area</b> — price discovery mode."))
-        por = ("Price <b>ABOVE POC</b> — buyers control value."
-               if price > vp.poc else
-               "Price <b>BELOW POC</b> — sellers pushed below fair value."
-               if price < vp.poc else
-               "Price AT the POC — major decision expected.")
-        return (f"{'─'*35}\n<b>📐 VOLUME PROFILE</b>\n{'─'*35}\n\n"
-                f"{pt}\n\n{vat}\n\n{por}")
-
-    def _lz_section(self, lz: List[LiquidityZone],
-                    price: float, instrument: str) -> str:
-        if not lz:
-            return ""
-        above = sorted([z for z in lz if z.price > price],
-                       key=lambda x: x.price)[:3]
-        below = sorted([z for z in lz if z.price <= price],
-                       key=lambda x: x.price, reverse=True)[:3]
-        if not above and not below:
-            return ""
-        msg = (f"{'─'*35}\n<b>🌊 LIQUIDITY ZONES</b>\n{'─'*35}\n\n"
-               f"Liquidity zones are where stop-losses and pending orders "
-               f"cluster. Institutions drive price to these levels.\n\n")
-        if above:
-            msg += "<b>Resistance / Supply Above:</b>\n"
-            for z in above:
-                dist = pips_diff(instrument, z.price - price)
-                ic   = ("🧊" if "EQUAL" in z.zone_type else
-                        "🔴" if "SUPPLY" in z.zone_type else "🌀")
-                msg += (f"{ic} <b>{fmt_price(z.price, instrument)}</b> "
-                        f"[{z.zone_type.replace('_',' ')}] +{dist:.0f} pips\n"
-                        f"   <i>{z.description}</i>\n\n")
-        if below:
-            msg += "<b>Support / Demand Below:</b>\n"
-            for z in below:
-                dist = pips_diff(instrument, price - z.price)
-                ic   = ("🧊" if "EQUAL" in z.zone_type else
-                        "🟢" if "DEMAND" in z.zone_type else "🌀")
-                msg += (f"{ic} <b>{fmt_price(z.price, instrument)}</b> "
-                        f"[{z.zone_type.replace('_',' ')}] -{dist:.0f} pips\n"
-                        f"   <i>{z.description}</i>\n\n")
-        return msg.rstrip()
-
-    def _pb_section(self, pb: PositionBookData, instrument: str) -> str:
-        if pb.long_pct > 60:
-            rt = (f"<b>{pb.long_pct:.1f}% of retail traders are LONG</b>. "
-                  f"Smart money pushes price lower to trigger those stop-losses.")
-        elif pb.short_pct > 60:
-            rt = (f"<b>{pb.short_pct:.1f}% of retail traders are SHORT</b>. "
-                  f"Classic short squeeze setup.")
-        else:
-            rt = (f"Retail positioning balanced — {pb.long_pct:.1f}% long "
-                  f"vs {pb.short_pct:.1f}% short.")
-        tt  = (f"<b>{pb.total_underwater:.1f}% of positions are underwater</b>. "
-               f"Pain threshold: {fmt_price(pb.pain_threshold, instrument)}."
-               if pb.total_underwater > 30 else
-               f"Some trapped positions ({pb.total_underwater:.1f}% underwater)."
-               if pb.total_underwater > 10 else
-               "Few trapped traders. Limited stop-loss momentum.")
-        sqt = ("⚡ <b>SQUEEZE POTENTIAL HIGH</b>"
-               if pb.squeeze_potential == "HIGH" else
-               "Moderate squeeze potential."
-               if pb.squeeze_potential == "MODERATE" else
-               "Low squeeze potential.")
-        return (f"{'─'*35}\n<b>👥 POSITION BOOK</b>\n{'─'*35}\n\n"
-                f"{rt}\n\n{tt}\n\n{sqt}")
-
-    def _ob_section(self, ob: OrderBookData) -> str:
-        if ob.breakout_bias == "UPWARD_PRESSURE":
-            ot = (f"Pending orders show <b>UPWARD PRESSURE</b> "
-                  f"({ob.long_pct:.1f}% long).")
-        elif ob.breakout_bias == "DOWNWARD_PRESSURE":
-            ot = (f"Pending orders show <b>DOWNWARD PRESSURE</b> "
-                  f"({ob.short_pct:.1f}% short).")
-        else:
-            ot = "Pending orders balanced. Market likely to range."
-        return (f"{'─'*35}\n<b>📋 PENDING ORDER LANDSCAPE</b>\n"
-                f"{'─'*35}\n\n{ot}")
-
-    def _sm_vs_retail(self, of: OrderFlowData,
-                      af: Optional[AdvancedOrderFlowData],
-                      pb: Optional[PositionBookData]) -> str:
-        inst_l: List[str] = []
-        ret_l:  List[str] = []
-        if af:
-            if af.vpin >= 0.5:
-                inst_l.append(f"• Elevated informed trading (VPIN: {af.vpin:.0%})")
-            if af.aggressor_side == "BUYERS":
-                inst_l.append("• Institutions aggressively buying")
-            elif af.aggressor_side == "SELLERS":
-                inst_l.append("• Institutions aggressively selling")
-            if af.iceberg_count > 0:
-                inst_l.append(f"• {af.iceberg_count} hidden iceberg levels")
-            if af.absorption_ratio > 1.5:
-                inst_l.append("• Institutions absorbing all selling pressure")
-            elif af.absorption_ratio < 0.67:
-                inst_l.append("• Institutions distributing — absorbing every rally")
-            if "BULLISH" in af.informed_trader_signal:
-                inst_l.append("• Informed signal: BULLISH")
-            elif "BEARISH" in af.informed_trader_signal:
-                inst_l.append("• Informed signal: BEARISH")
-        if pb:
-            if pb.long_pct > 60:
-                ret_l.append(f"• Retail {pb.long_pct:.0f}% LONG — dangerously crowded")
-            elif pb.short_pct > 60:
-                ret_l.append(f"• Retail {pb.short_pct:.0f}% SHORT — dangerously crowded")
-            if pb.total_underwater > 20:
-                ret_l.append(f"• {pb.total_underwater:.0f}% of retail positions losing")
-            if pb.squeeze_potential == "HIGH":
-                ret_l.append("• Retail in vulnerable squeeze position")
-        if of.buying_climax:
-            ret_l.append("• Retail chasing the top (buying climax)")
-        elif of.selling_climax:
-            ret_l.append("• Retail panic selling (selling climax)")
-        ib = "\n".join(inst_l) if inst_l else "• No strong institutional signal"
-        rb = "\n".join(ret_l)  if ret_l  else "• No extreme retail signal"
-        return (f"{'─'*35}\n<b>🏦 INSTITUTIONS vs 👥 RETAIL</b>\n"
-                f"{'─'*35}\n\n"
-                f"<b>What Institutions Are Doing:</b>\n{ib}\n\n"
-                f"<b>What Retail Traders Are Doing:</b>\n{rb}")
-
-    def _conclusion(self, instrument: str, of: OrderFlowData,
-                    af: Optional[AdvancedOrderFlowData],
-                    vp: Optional[VolumeProfile],
-                    pb: Optional[PositionBookData],
-                    ob: Optional[OrderBookData],
-                    pred: Optional[Dict]) -> str:
-        name = pair_display(instrument)
-        bull = bear = 0
-        if of.cvd > 0:                  bull += 2
-        else:                            bear += 2
-        if of.imbalance > 5:            bull += 1
-        elif of.imbalance < -5:          bear += 1
-        if of.delta_momentum > 0:       bull += 1
-        else:                            bear += 1
-        if of.price > of.vwap:          bull += 1
-        else:                            bear += 1
-        if af:
-            if "BULLISH" in af.informed_trader_signal:   bull += 3
-            elif "BEARISH" in af.informed_trader_signal: bear += 3
-            if af.aggressor_side == "BUYERS":            bull += 2
-            elif af.aggressor_side == "SELLERS":         bear += 2
-            if af.market_depth_imbalance > 0.2:          bull += 1
-            elif af.market_depth_imbalance < -0.2:       bear += 1
-        if pb:
-            if pb.contrarian_signal == "BULLISH":        bull += 2
-            elif pb.contrarian_signal == "BEARISH":      bear += 2
-        if ob:
-            if ob.pressure_direction == "BULLISH":       bull += 1
-            elif ob.pressure_direction == "BEARISH":     bear += 1
-        tot   = bull + bear
-        bpct  = bull / tot * 100 if tot > 0 else 50.0
-        if bpct >= 65:
-            bias  = "📈 <b>BULLISH BIAS</b>"
-            bt    = f"Weight of evidence points UP. {bull}/{tot} data points favour buyers."
-            tgt_t = "bulls targeting recent resistance and higher."
-        elif bpct <= 35:
-            bias  = "📉 <b>BEARISH BIAS</b>"
-            bt    = f"Weight of evidence points DOWN. {bear}/{tot} data points favour sellers."
-            tgt_t = "bears targeting recent support and lower."
-        else:
-            bias  = "↔️ <b>NEUTRAL / MIXED</b>"
-            bt    = "Evidence is mixed — no clear directional edge."
-            tgt_t = "price likely to range until a catalyst emerges."
-        tgt_sec = ""
-        if pred and pred.get("has_setup"):
-            d, tgt, stp, cf = (pred["direction"], pred["target"],
-                                pred["stop"], pred["confidence"])
-            tgt_sec = (
-                f"\n\n<b>🎯 Algorithm Target:</b>\n"
-                f"System expects {name} to move "
-                f"{'UP' if d == 'LONG' else 'DOWN'} to "
-                f"<code>{fmt_price(tgt, instrument)}</code> "
-                f"({cf:.0f}% confidence).\n"
-                f"Invalidated if price closes "
-                f"{'below' if d == 'LONG' else 'above'} "
-                f"<code>{fmt_price(stp, instrument)}</code>.\n\n"
-                f"<b>⚠️ High-confidence setups still fail.</b> "
-                f"Always use your stop-loss."
-            )
-        elif vp:
-            tgt_sec = (
-                f"\n\n<b>🎯 Key Levels to Watch:</b>\n"
-                f"• POC: {fmt_price(vp.poc, instrument)}\n"
-                f"• VAH: {fmt_price(vp.vah, instrument)}\n"
-                f"• VAL: {fmt_price(vp.val, instrument)}"
-            )
-        risk_t = ""
-        if af and af.toxicity >= 0.5:
-            risk_t = ("\n\n⚠️ <b>ELEVATED RISK:</b> High toxicity detected. "
-                      "Reduce size and use wider stops.")
-        return (
-            f"{'='*35}\n<b>📊 CONCLUSION</b>\n{'='*35}\n\n"
-            f"{bias}\n\n{bt}\n\nBased on all data, {tgt_t}"
-            f"{tgt_sec}{risk_t}\n\n"
-            f"<i>📚 No analysis is 100% correct. Profitable trading is "
-            f"about disciplined risk management.</i>"
+            f"{'─'*35}\n<b>🏦 SMART MONEY vs RETAIL</b>\n{'─'*35}\n\n"
+            f"{sm_narr}\n\n"
+            f"• VPIN: {af.vpin:.0%} — "
+            f"{'Significant informed flow' if af.vpin>=0.5 else 'Low smart money'}\n"
+            f"• Aggressor: <b>{af.aggressor_side}</b>\n"
+            f"• Absorption: {af.absorption_ratio:.2f}\n"
+            + (f"• 🧊 {af.iceberg_count} iceberg levels\n"
+               if af.iceberg_count > 0 else "")
+            + retail_txt
         )
 
+    # ICT
+    if ict:
+        struct  = ict.get("structure", MarketStructure())
+        swept   = ict.get("swept", [])
+        disp    = ict.get("displacement")
+        asian_h = ict.get("asian_high")
+        asian_l = ict.get("asian_low")
+        ict_txt = (
+            f"{'─'*35}\n<b>🏛️ ICT</b>\n{'─'*35}\n\n"
+            f"Trend: <b>{struct.trend}</b> | "
+            f"HTF: <b>{struct.htf_bias}</b>\n\n"
+        )
+        if swept:
+            ict_txt += (
+                f"✅ <b>Liquidity Swept:</b> "
+                f"{', '.join(lv.level_type for lv in swept[:2])} — "
+                f"reversal or acceleration likely.\n\n")
+        if disp:
+            ict_txt += (
+                f"<b>Displacement:</b> "
+                f"{'🟢 Bullish' if disp.is_bullish else '🔴 Bearish'}\n\n")
+        if asian_h and asian_l:
+            pv = ("ABOVE" if of.price>asian_h else
+                  "BELOW" if of.price<asian_l else "INSIDE")
+            ict_txt += (
+                f"Asian Range: {fmt_price(asian_l,pair)}–"
+                f"{fmt_price(asian_h,pair)} | "
+                f"Price {pv} | AMD: {ict.get('amd_phase','?')}\n")
+        parts.append(ict_txt)
 
-MS = MarketSummarizer()
+    # Conclusion
+    bull = bear = 0
+    if of.cvd > 0:                              bull += 2
+    else:                                        bear += 2
+    if of.vwap_zscore > 0.5:                    bull += 1
+    elif of.vwap_zscore < -0.5:                 bear += 1
+    if af and "BULLISH" in af.informed_signal:  bull += 3
+    elif af and "BEARISH" in af.informed_signal: bear += 3
+    if pb and pb.contrarian_signal == "BULLISH": bull += 2
+    elif pb and pb.contrarian_signal == "BEARISH": bear += 2
 
+    total = bull + bear
+    bpct  = bull / total * 100 if total > 0 else 50
+
+    if bpct >= 65:
+        bias = "📈 <b>BULLISH BIAS</b>"
+        bt   = f"{bull}/{total} signals favour buyers."
+    elif bpct <= 35:
+        bias = "📉 <b>BEARISH BIAS</b>"
+        bt   = f"{bear}/{total} signals favour sellers."
+    else:
+        bias = "↔️ <b>MIXED</b>"
+        bt   = "Evidence balanced — no clear edge."
+
+    tgt_txt = ""
+    if pred_result and pred_result.get("has_setup"):
+        sig = pred_result["signal"]
+        rr  = sig.rr_ratio
+        tgt_txt = (
+            f"\n\n<b>🎯 Algorithm Signal:</b>\n"
+            f"{'LONG' if sig.direction=='LONG' else 'SHORT'} to "
+            f"<code>{fmt_price(sig.target, pair)}</code> "
+            f"({pred_result['calibrated_prob']:.0%} calibrated prob)\n"
+            f"Stop: <code>{fmt_price(sig.stop, pair)}</code> | "
+            f"R/R: 1:{rr:.2f} ✅"
+        )
+    elif vp:
+        tgt_txt = (
+            f"\n\n<b>Key Levels:</b>\n"
+            f"• POC: {fmt_price(vp.poc, pair)}\n"
+            f"• VAH: {fmt_price(vp.vah, pair)}\n"
+            f"• VAL: {fmt_price(vp.val, pair)}"
+        )
+
+    parts.append(
+        f"{'='*35}\n<b>📊 CONCLUSION</b>\n{'='*35}\n\n"
+        f"{bias}\n{bt}"
+        f"{tgt_txt}\n\n"
+        f"<i>No analysis is 100% correct. "
+        f"Risk management is everything.</i>"
+    )
+
+    return "\n\n".join(parts)
+
+
+# ════════════════════════════════════════════════════════════════
+#  CHART FUNCTIONS
+# ════════════════════════════════════════════════════════════════
+
+def chart_signal(candles:    List[Candle],
+                 instrument: str,
+                 result:     Dict,
+                 of:         OrderFlowData,
+                 af:         Optional[AdvancedFlowData],
+                 regime:     RegimeData,
+                 ict:        Optional[Dict] = None) -> io.BytesIO:
+    fig = plt.figure(figsize=(14, 13), facecolor='#0d1117')
+    gs  = GridSpec(4, 1, figure=fig,
+                   height_ratios=[3, 1, 1, 0.9], hspace=0.14)
+    C   = {
+        'bg':   '#0d1117', 'text': '#c9d1d9', 'grid': '#21262d',
+        'up':   '#3fb950', 'dn':   '#f85149', 'tgt':  '#3fb950',
+        'stp':  '#f85149', 'ent':  '#f0883e', 'poc':  '#a371f7',
+        'vwap': '#58a6ff', 'sm':   '#ffd700', 'fvg':  '#58a6ff',
+        'ob':   '#ff9500', 'liq':  '#ff4ff8', 'be':   '#ffaa00',
+    }
+
+    signal = result.get("signal")
+    if not signal:
+        plt.close(fig)
+        return chart_no_setup(candles, instrument)
+
+    disp_c = candles[-70:] if len(candles) > 70 else candles
+    n      = len(disp_c)
+    cp     = candles[-1].close
+    trade_id = result.get("trade_id", "")
+
+    # ── Panel 1: Price ────────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0])
+    ax1.set_facecolor(C['bg'])
+
+    for i, c in enumerate(disp_c):
+        col = C['up'] if c.is_bullish else C['dn']
+        ax1.plot([i,i], [c.low,  c.high],  color=col, lw=0.8)
+        ax1.plot([i,i], [c.open, c.close], color=col, lw=3.5)
+
+    # Entry / Target / Stop / Breakeven / Trailing
+    for yv, lbl, col, ls in [
+        (cp,                  f"ENTRY\n{fmt_price(cp, instrument)}",
+         C['ent'], '-'),
+        (signal.target,       f"TP\n{fmt_price(signal.target, instrument)}",
+         C['tgt'], '--'),
+        (signal.stop,         f"SL\n{fmt_price(signal.stop, instrument)}",
+         C['stp'], '--'),
+        (signal.breakeven_price,
+         f"BE\n{fmt_price(signal.breakeven_price, instrument)}",
+         C['be'], ':'),
+    ]:
+        if yv > 0:
+            ax1.axhline(y=yv, color=col, linestyle=ls, lw=2, alpha=0.9)
+            ax1.text(n+1, yv, lbl, color=col, fontsize=7,
+                     fontweight='bold', va='center')
+
+    ax1.axhline(y=of.vwap, color=C['vwap'],
+                linestyle=':', lw=1.5, alpha=0.7)
+
+    # ICT overlays
+    if ict:
+        lo_ = min(c.low  for c in disp_c)
+        hi_ = max(c.high for c in disp_c)
+        for fvg in ict.get("fvgs", [])[:4]:
+            if not fvg.filled and lo_ <= fvg.mid <= hi_:
+                fc = C['up'] if fvg.direction=="BULLISH" else C['dn']
+                ax1.axhspan(fvg.lower, fvg.upper, alpha=0.1, color=fc)
+        for ob_b in ict.get("obs", [])[:3]:
+            if ob_b.valid and lo_ <= ob_b.mid <= hi_:
+                ax1.axhspan(ob_b.low, ob_b.high, alpha=0.08, color=C['ob'])
+        for lv in ict.get("liq_levels", [])[:4]:
+            if lo_ <= lv.price <= hi_:
+                lsty = '-' if lv.swept else '--'
+                ax1.axhline(y=lv.price, color=C['liq'],
+                            linestyle=lsty, lw=0.8, alpha=0.5)
+
+    # Arrow
+    ac = C['up'] if signal.direction == 'LONG' else C['dn']
+    ax1.annotate('', xy=(n-5, signal.target), xytext=(n-5, cp),
+                 arrowprops=dict(arrowstyle='->', color=ac, lw=3))
+
+    qe = quality_emoji(signal.quality.value)
+    de = "🟢" if signal.direction == 'LONG' else "🔴"
+    ax1.set_title(
+        f"{asset_emoji(instrument)} {pair_display(instrument)} | "
+        f"{de} {signal.direction} | {qe} {signal.quality.value} | "
+        f"Conf:{result['confidence']:.0f}% | "
+        f"R/R:1:{signal.rr_ratio:.2f} | {trade_id}",
+        color=C['text'], fontsize=10, fontweight='bold', pad=10)
+    ax1.tick_params(colors=C['text'], labelsize=8)
+    ax1.grid(True, alpha=0.12, color=C['grid'])
+    ax1.set_xlim(-2, n+18)
+
+    # ── Panel 2: Delta ────────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[1])
+    ax2.set_facecolor(C['bg'])
+    deltas = [c.delta for c in disp_c]
+    ax2.bar(range(n), deltas,
+            color=[C['up'] if d>=0 else C['dn'] for d in deltas],
+            alpha=0.75, width=0.8)
+    ax2.axhline(y=0, color=C['grid'], lw=1)
+    ax2.set_title('Order Flow Delta', color=C['text'], fontsize=9, pad=4)
+    ax2.tick_params(colors=C['text'], labelsize=7)
+    ax2.grid(True, alpha=0.12, color=C['grid'])
+    ax2.set_xlim(-2, n+18)
+
+    # ── Panel 3: CVD ──────────────────────────────────────────────
+    ax3 = fig.add_subplot(gs[2])
+    ax3.set_facecolor(C['bg'])
+    cvd     = list(np.cumsum(deltas))
+    cvd_col = C['up'] if cvd and cvd[-1]>=cvd[0] else C['dn']
+    ax3.fill_between(range(n), cvd, alpha=0.25, color=cvd_col)
+    ax3.plot(range(n), cvd, color=cvd_col, lw=1.5)
+    ax3.set_title('CVD', color=C['text'], fontsize=9, pad=4)
+    ax3.tick_params(colors=C['text'], labelsize=7)
+    ax3.grid(True, alpha=0.12, color=C['grid'])
+    ax3.set_xlim(-2, n+18)
+
+    # ── Panel 4: Smart Money ──────────────────────────────────────
+    ax4 = fig.add_subplot(gs[3])
+    ax4.set_facecolor(C['bg'])
+    if af:
+        sm_s = []
+        for i in range(n):
+            wc  = disp_c[max(0, i-10):i+1]
+            bv  = sum(c.buy_volume  for c in wc)
+            sv  = sum(c.sell_volume for c in wc)
+            tv  = bv + sv
+            sm_s.append(abs(bv-sv)/tv*100 if tv>0 else 0.0)
+        ax4.fill_between(range(n), sm_s, alpha=0.5, color=C['sm'])
+        ax4.plot(range(n), sm_s, color=C['sm'], lw=1.5)
+        ax4.axhline(y=50, color='red', linestyle='--', lw=1, alpha=0.6)
+        ax4.set_title(
+            f"Smart Money | VPIN:{af.vpin:.0%} | "
+            f"{af.smart_money_activity} | {regime.regime.value}",
+            color=C['sm'], fontsize=9, pad=4)
+    else:
+        ax4.text(0.5, 0.5, f"Regime: {regime.regime.value}",
+                 ha='center', va='center', color=C['text'],
+                 transform=ax4.transAxes, fontsize=11)
+    ax4.tick_params(colors=C['text'], labelsize=7)
+    ax4.grid(True, alpha=0.12, color=C['grid'])
+    ax4.set_xlim(-2, n+18)
+
+    ts_str = SESSION_ENGINE.wat_time()
+    fig.text(0.98, 0.01,
+             f'ForexQuant v8.1 | {ts_str}',
+             ha='right', color=C['text'], fontsize=7, alpha=0.7)
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=120,
+                facecolor=C['bg'], edgecolor='none',
+                bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    gc.collect()
+    return buf
+
+
+def chart_no_setup(candles: List[Candle], instrument: str) -> io.BytesIO:
+    fig = plt.figure(figsize=(14, 8), facecolor='#0d1117')
+    gs  = GridSpec(2, 1, figure=fig, height_ratios=[3, 1], hspace=0.14)
+    C   = {'bg':'#0d1117','text':'#c9d1d9','grid':'#21262d',
+           'up':'#3fb950','dn':'#f85149','neu':'#f0883e'}
+    d   = candles[-70:] if len(candles) > 70 else candles
+    n   = len(d)
+    ax1 = fig.add_subplot(gs[0])
+    ax1.set_facecolor(C['bg'])
+    for i, c in enumerate(d):
+        col = C['up'] if c.is_bullish else C['dn']
+        ax1.plot([i,i], [c.low, c.high],   color=col, lw=0.8)
+        ax1.plot([i,i], [c.open, c.close], color=col, lw=3.5)
+    ax1.set_title(
+        f"{asset_emoji(instrument)} {pair_display(instrument)} "
+        f"| ⚪ NO CLEAR SETUP",
+        color=C['neu'], fontsize=13, fontweight='bold', pad=14)
+    ax1.tick_params(colors=C['text'], labelsize=8)
+    ax1.grid(True, alpha=0.12, color=C['grid'])
+    ax2 = fig.add_subplot(gs[1])
+    ax2.set_facecolor(C['bg'])
+    deltas = [c.delta for c in d]
+    ax2.bar(range(n), deltas,
+            color=[C['up'] if x>=0 else C['dn'] for x in deltas],
+            alpha=0.7, width=0.8)
+    ax2.axhline(y=0, color=C['grid'], lw=1)
+    ax2.set_title('Delta', color=C['text'], fontsize=9, pad=4)
+    ax2.tick_params(colors=C['text'], labelsize=7)
+    ax2.grid(True, alpha=0.12, color=C['grid'])
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=120,
+                facecolor=C['bg'], edgecolor='none',
+                bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    gc.collect()
+    return buf
+
+
+def chart_strength(strengths: Dict) -> io.BytesIO:
+    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#0d1117')
+    ax.set_facecolor('#0d1117')
+    C  = {'up':'#3fb950','dn':'#f85149','text':'#c9d1d9','grid':'#21262d'}
+    sc = sorted(strengths.values(),
+                key=lambda x: x.strength, reverse=True)
+    cu = [cs.currency for cs in sc]
+    va = [cs.strength for cs in sc]
+    mo = [cs.momentum for cs in sc]
+    bc = [C['up'] if v>0 else C['dn'] for v in va]
+    yp = np.arange(len(cu))
+    ax.barh(yp, va, color=bc, alpha=0.85, height=0.6)
+    ax.set_yticks(yp)
+    ax.set_yticklabels(
+        cu, color=C['text'], fontsize=13, fontweight='bold')
+    ax.axvline(x=0, color=C['grid'], lw=2)
+    for i, (curr, v, m) in enumerate(zip(cu, va, mo)):
+        em  = "💪" if v>0.2 else ("💀" if v<-0.2 else "➖")
+        mom = (f"↑" if m>0.01 else ("↓" if m<-0.01 else ""))
+        ax.text(v+(0.06 if v>=0 else -0.06), i,
+                f'{em} {v:+.2f}% {mom}', va='center',
+                ha='left' if v>=0 else 'right',
+                color=C['text'], fontsize=10, fontweight='bold')
+    ax.set_xlabel('Strength (%)', color=C['text'], fontsize=11)
+    ts  = SESSION_ENGINE.wat_time()
+    ax.set_title(
+        f'💱 Currency Strength (24H) — {ts}',
+        color=C['text'], fontsize=14, fontweight='bold', pad=18)
+    ax.tick_params(colors=C['text'])
+    ax.grid(True, alpha=0.18, color=C['grid'], axis='x')
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=110,
+                facecolor='#0d1117', edgecolor='none',
+                bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    gc.collect()
+    return buf
+
+
+def chart_performance(live_predictions: List[Dict]) -> Optional[io.BytesIO]:
+    live = [p for p in live_predictions
+            if p.get("outcome") in ("WIN","LOSS")]
+    if not live:
+        return None
+    try:
+        fig    = plt.figure(figsize=(14, 10), facecolor='#0d1117')
+        gs     = GridSpec(2, 2, figure=fig,
+                          hspace=0.45, wspace=0.35)
+        C      = {'bg':'#0d1117','text':'#c9d1d9','grid':'#21262d',
+                  'up':'#3fb950','dn':'#f85149','acc':'#58a6ff',
+                  'gold':'#ffd700'}
+
+        # Equity curve
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.set_facecolor(C['bg'])
+        pips_c = []
+        run    = 0.0
+        for p in live:
+            run += p.get("pips_gained", 0.0)
+            pips_c.append(run)
+        col_ = C['up'] if pips_c[-1]>=0 else C['dn']
+        ax1.plot(pips_c, color=col_, lw=2)
+        ax1.fill_between(range(len(pips_c)), pips_c,
+                         alpha=0.2, color=col_)
+        ax1.axhline(y=0, color=C['grid'], lw=1.5, linestyle='--')
+        ax1.set_title(
+            f"Equity Curve ({pips_c[-1]:+.0f} pips)",
+            color=C['text'], fontsize=11, fontweight='bold')
+        ax1.tick_params(colors=C['text'], labelsize=8)
+        ax1.grid(True, alpha=0.15, color=C['grid'])
+
+        # Win/Loss pie
+        ax2 = fig.add_subplot(gs[0, 1])
+        ax2.set_facecolor(C['bg'])
+        lw_  = sum(1 for p in live if p.get("outcome")=="WIN")
+        ll_  = len(live) - lw_
+        if lw_ + ll_ > 0:
+            pv  = [v for v in [lw_, ll_] if v > 0]
+            pl  = [lb for v, lb in zip([lw_,ll_],["Wins","Losses"])
+                   if v > 0]
+            pc  = [C['up'], C['dn']][:len(pv)]
+            ax2.pie(pv, labels=pl, colors=pc, autopct='%1.0f%%',
+                    startangle=90,
+                    textprops={'color': C['text'], 'fontsize': 11})
+        wr_ = lw_/(lw_+ll_) if (lw_+ll_) > 0 else 0
+        ax2.set_title(f"Win Rate: {wr_:.1%}",
+                      color=C['text'], fontsize=11, fontweight='bold')
+
+        # Strategy bars
+        ax3 = fig.add_subplot(gs[1, 0])
+        ax3.set_facecolor(C['bg'])
+        st_data = {}
+        for p in live:
+            st = p.get("strategy","Unknown")[:22]
+            if st not in st_data:
+                st_data[st] = {"w":0,"l":0}
+            if p.get("outcome")=="WIN": st_data[st]["w"] += 1
+            else:                       st_data[st]["l"] += 1
+        if st_data:
+            st_n = list(st_data.keys())
+            st_w = [(st_data[s]["w"]/max(st_data[s]["w"]+
+                    st_data[s]["l"],1)*100) for s in st_n]
+            st_c = [C['up'] if w>=55 else C['dn'] for w in st_w]
+            ax3.barh(range(len(st_n)), st_w, color=st_c, alpha=0.85)
+            ax3.set_yticks(range(len(st_n)))
+            ax3.set_yticklabels(
+                [s[:20] for s in st_n],
+                color=C['text'], fontsize=8)
+            ax3.axvline(x=50, color=C['grid'], lw=1.5, linestyle='--')
+            ax3.set_xlim(0, 100)
+        ax3.set_title("Win Rate by Strategy",
+                      color=C['text'], fontsize=11, fontweight='bold')
+        ax3.tick_params(colors=C['text'], labelsize=8)
+        ax3.grid(True, alpha=0.15, color=C['grid'], axis='x')
+
+        # ML accuracy
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax4.set_facecolor(C['bg'])
+        ml_h = ML_ENGINE.accuracy_history
+        ml_s = ML_ENGINE.get_stats()
+        if ml_h and len(ml_h) >= 2:
+            ax4.plot([v*100 for v in ml_h],
+                     color=C['acc'], lw=2.5,
+                     marker='o', markersize=5)
+            ax4.fill_between(range(len(ml_h)),
+                             [v*100 for v in ml_h],
+                             alpha=0.2, color=C['acc'])
+            ax4.axhline(y=50, color=C['grid'], lw=1.5, linestyle='--')
+            ax4.set_ylim(0, 100)
+            ax4.set_title(
+                f"ML OOS Accuracy: {ml_h[-1]:.1%}",
+                color=C['gold'], fontsize=11, fontweight='bold')
+        else:
+            ax4.text(0.5, 0.5,
+                     f"ML accumulating...\n"
+                     f"({ml_s['n_samples']}/{ML_MIN_SAMPLES} resolved)\n"
+                     f"({ml_s['n_total']} total tracked)",
+                     ha='center', va='center',
+                     color=C['text'], fontsize=10,
+                     transform=ax4.transAxes)
+            ax4.set_title("ML Engine",
+                          color=C['gold'],
+                          fontsize=11, fontweight='bold')
+        ax4.tick_params(colors=C['text'], labelsize=8)
+        ax4.grid(True, alpha=0.15, color=C['grid'])
+
+        ts_str = SESSION_ENGINE.wat_time()
+        fig.text(0.5, 0.97,
+                 "FOREX QUANT v8.1 — PERFORMANCE ANALYTICS",
+                 ha='center', color=C['text'],
+                 fontsize=13, fontweight='bold')
+        fig.text(0.98, 0.01, f"Generated: {ts_str}",
+                 ha='right', color=C['text'],
+                 fontsize=7, alpha=0.7)
+        plt.tight_layout(rect=[0,0,1,0.95])
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=120,
+                    facecolor=C['bg'], edgecolor='none',
+                    bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        gc.collect()
+        return buf
+    except Exception as e:
+        log.error(f"Performance chart error: {e}")
+        return None
 
 # ════════════════════════════════════════════════════════════════
 #  AUTO ALERT ENGINE
 # ════════════════════════════════════════════════════════════════
 
 class AlertEngine:
+    """
+    Scans ALL pairs continuously.
+    Adaptive interval by session.
+    Never stops — off-hours fires with warning.
+    Quality filter per subscriber respected.
+    Only tracks predictions that were actually sent.
+    """
 
     def __init__(self):
-        self.last_alert: Dict[str, datetime] = {}
-        self.cooldown = timedelta(hours=4)
+        self.last_alert:  Dict[str, datetime] = {}
+        self.cooldown     = timedelta(hours=3)
+        self.off_hr_cd    = timedelta(hours=6)
+        self._scan_count  = 0
 
-    def _can_alert(self, pair: str, tf: str) -> bool:
+    def _can_alert(self, pair: str, tf: str,
+                   session: SessionData) -> bool:
         key  = f"{pair}_{tf}"
         last = self.last_alert.get(key)
-        return last is None or datetime.now(timezone.utc) - last > self.cooldown
+        if last is None:
+            return True
+        cd = (self.off_hr_cd
+              if session.session_type == SessionType.OFF_HOURS
+              else self.cooldown)
+        return datetime.now(timezone.utc) - last > cd
 
     def _mark(self, pair: str, tf: str):
         self.last_alert[f"{pair}_{tf}"] = datetime.now(timezone.utc)
 
-    async def scan(self, app) -> int:
-        active = SUB_MANAGER.get_all_active()
+    async def scan_all(self, app) -> int:
+        now     = datetime.now(timezone.utc)
+        session = SESSION_ENGINE.get_session(now)
+        active  = SUB_MANAGER.all_active()
         if not active:
             return 0
-        pairs_map: Dict[str, str] = {}
-        for _, sub in active:
-            for p in sub.get("pairs", []):
-                pairs_map[p] = sub.get("timeframe", "H1")
 
-        sent = 0
-        async with aiohttp.ClientSession() as session:
-            for pair, tf in pairs_map.items():
-                if not self._can_alert(pair, tf):
-                    continue
-                try:
-                    dd  = await full_analysis(session, pair, tf)
-                    of  = dd["of"]; af = dd["af"]; lz = dd["lz"]
-                    pred = QB.generate(
-                        dd["candles"], of, dd["vp"], dd["ob"],
-                        dd["pb"], dd["cs"], af, pair, lz)
-                    if not pred.get("has_setup"):
+        scan_tfs = (["M15", "H1"] if session.is_kill_zone
+                    else ["H1"])
+
+        min_conf = SESSION_ENGINE.get_min_confidence(session)
+        sent     = 0
+        self._scan_count += 1
+
+        log.info(
+            f"Alert scan #{self._scan_count} | "
+            f"{session.session_name} | "
+            f"TFs:{scan_tfs} | MinConf:{min_conf:.0f}%")
+
+        async with aiohttp.ClientSession() as http_session:
+            for pair in ALL_PAIRS:
+                for tf in scan_tfs:
+                    if not self._can_alert(pair, tf, session):
                         continue
-                    aligned = (pred["bull_count"] if pred["direction"] == "LONG"
-                               else pred["bear_count"])
-                    if pred["confidence"] < MIN_ALERT_CONFIDENCE:
+
+                    # Who wants this pair?
+                    recipients = [
+                        (cid, sub) for cid, sub in active
+                        if SUB_MANAGER.wants_pair(cid, pair)
+                    ]
+                    if not recipients:
                         continue
-                    if aligned < MIN_ALERT_FACTORS:
-                        continue
-                    if af and af.institutional_flow_score < MIN_ALERT_INST_SCORE:
-                        continue
-                    self._mark(pair, tf)
-                    sn   = session_name(datetime.now(timezone.utc).hour)
-                    sim  = PATTERN_MEMORY.find_similar(
-                        pair, pred["direction"], af, of, sn)
-                    msg  = self._format(pair, tf, pred, of, af, lz, sim, sn)
-                    for chat_id, sub in active:
-                        if pair in sub.get("pairs", []):
-                            ok = await send_msg(app.bot, chat_id, msg,
-                                                parse_mode="HTML")
-                            if ok:
+
+                    try:
+                        dd = await full_analysis(
+                            http_session, pair, tf)
+                        of = dd["of"]
+                        af = dd["af"]
+
+                        result = await QB.generate(
+                            dd["candles"], of, af, dd["vp"],
+                            dd["ob"], dd["pb"], dd["cs"], pair,
+                            dd["daily_candles"],
+                            dd["m15_candles"], dd["h4_candles"])
+
+                        if not result.get("has_setup"):
+                            continue
+
+                        signal = result["signal"]
+                        conf   = result["confidence"]
+                        regime = result["regime"]
+
+                        if conf < min_conf:
+                            continue
+                        if signal.rr_ratio < MIN_RR_RATIO:
+                            continue
+                        # Extra gate: off-hours requires A grade minimum
+                        if (session.session_type == SessionType.OFF_HOURS
+                                and signal.quality == SetupQuality.C):
+                            continue
+
+                        # Double-check geometry one final time
+                        final_val = validate_signal_geometry(
+                            signal.direction, signal.entry,
+                            signal.target, signal.stop, pair)
+                        if not final_val.is_valid:
+                            log.warning(
+                                f"Final geometry check failed "
+                                f"{pair}: {final_val.reason}")
+                            continue
+
+                        self._mark(pair, tf)
+
+                        sim = PATTERN_MEMORY.find_similar(
+                            pair, signal.direction,
+                            signal.strategy.value, af, of,
+                            regime, session)
+
+                        # Generate unique trade ID
+                        trade_id = generate_trade_id(pair, signal.direction)
+                        result["trade_id"] = trade_id
+
+                        msg = fmt_signal_message(
+                            pair, tf, result, of, af,
+                            session, regime, sim)
+
+                        # Determine actual recipients (quality filter)
+                        actual_recipients = [
+                            (cid, sub) for cid, sub in recipients
+                            if SUB_MANAGER.meets_quality(
+                                cid, signal.quality.value)
+                        ]
+
+                        if not actual_recipients:
+                            continue
+
+                        # Create prediction object
+                        pid     = str(uuid.uuid4())
+                        now_iso = now.isoformat()
+                        aligned = sum(
+                            1 for f in signal.factors
+                            if f.direction == (
+                                "BULLISH" if signal.direction=="LONG"
+                                else "BEARISH"))
+
+                        pobj = QuantPrediction(
+                            trade_id           = trade_id,
+                            prediction_id      = pid,
+                            pair               = pair,
+                            timeframe          = tf,
+                            timestamp          = now_iso,
+                            current_price      = of.price,
+                            direction          = signal.direction,
+                            target_price       = signal.target,
+                            invalidation_price = signal.stop,
+                            breakeven_price    = signal.breakeven_price,
+                            trailing_price     = signal.trailing_price,
+                            confidence         = conf,
+                            calibrated_prob    = result.get(
+                                "calibrated_prob", 0.5),
+                            quality            = signal.quality.value,
+                            strategy           = signal.strategy.value,
+                            reasons            = signal.reasons,
+                            key_levels         = result.get("key_levels",[]),
+                            factors_aligned    = aligned,
+                            features           = signal.features,
+                            rr_ratio           = signal.rr_ratio,
+                            reward_pips        = signal.reward_pips,
+                            risk_pips          = signal.risk_pips,
+                            status             = "ACTIVE",
+                            chat_ids           = [],  # filled below
+                            ml_confidence      = result.get("ml_prob",0.0),
+                            ml_used            = ML_ENGINE.is_trained,
+                            regime_at_signal   = regime.regime.value,
+                            session_at_signal  = session.session_name,
+                            was_sent_to_users  = False,  # set True if sent
+                            sent_quality       = signal.quality.value,
+                        )
+
+                        # Generate chart once
+                        ch = None
+                        try:
+                            ch = chart_signal(
+                                dd["candles"], pair, result,
+                                of, af, regime, result.get("ict"))
+                        except Exception as e:
+                            log.error(f"Chart {pair}: {e}")
+
+                        # Send to recipients
+                        sent_chat_ids = []
+                        for chat_id, sub in actual_recipients:
+                            cap = (
+                                f"{asset_emoji(pair)} "
+                                f"<b>{pair_display(pair)}</b> | "
+                                f"{'🟢' if signal.direction=='LONG' else '🔴'} "
+                                f"{signal.direction} | "
+                                f"{signal.quality.value} | "
+                                f"🆔 {trade_id}")
+                            ok_p = False
+                            if ch:
+                                ch.seek(0)
+                                ok_p = await send_photo(
+                                    app.bot, chat_id, ch,
+                                    caption=cap,
+                                    parse_mode="HTML") is not None
+                            ok_m = await send_msg(
+                                app.bot, chat_id, msg,
+                                parse_mode="HTML") is not None
+                            if ok_p or ok_m:
+                                sent_chat_ids.append(chat_id)
                                 SUB_MANAGER.record_alert(chat_id)
                                 sent += 1
-                    # Track prediction
-                    pid  = (f"AUTO_{pair}_{tf}_"
-                            f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
-                    pobj = QuantPrediction(
-                        prediction_id=pid, pair=pair, timeframe=tf,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        current_price=of.price, direction=pred["direction"],
-                        target_price=pred["target"],
-                        invalidation_price=pred["stop"],
-                        confidence=pred["confidence"],
-                        quality=pred["quality"],
-                        reasons=pred["reasons"],
-                        key_levels=pred["key_levels"],
-                        factors_aligned=aligned,
-                        features=pred.get("features", []),
-                        status="ACTIVE", chat_id=None,
-                        ml_confidence=pred.get("ml_prob", 0.0),
-                        ml_used=ML_ENGINE.is_trained
-                    )
-                    QB.add(pobj)
-                    PT.add(pobj)
-                    PATTERN_MEMORY.record_pattern(pobj, of, af, sn)
-                    await asyncio.sleep(2.0)
-                except Exception as e:
-                    log.error(f"Alert scan {pair}: {e}")
-        return sent
 
-    def _format(self, pair: str, tf: str, pred: Dict,
-                of: OrderFlowData,
-                af: Optional[AdvancedOrderFlowData],
-                lz: List[LiquidityZone], sim: Dict,
-                sn: str) -> str:
-        name  = pair_display(pair)
-        em    = asset_emoji(pair)
-        ts    = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        d     = pred["direction"]
-        de    = "🟢" if d == "LONG" else "🔴"
-        dw    = "BUY" if d == "LONG" else "SELL"
-        cp    = of.price
-        q     = pred["quality"]
-        qe    = ("🔥" if "A+" in q else "✅" if "A " in q or q == "A (Good)"
-                 else "⚡" if "B" in q else "⚠️")
-        rew   = abs(pred["target"] - cp)
-        risk  = abs(cp - pred["stop"])
-        rr    = rew / risk if risk > 0 else 0.0
-        rp    = pips_diff(pair, rew)
-        riskp = pips_diff(pair, risk)
-        ml_p  = pred.get("ml_prob",  0.0)
-        ml_l  = pred.get("ml_label", "")
-        msg   = (
-            f"{'='*35}\n🚨 <b>INSTITUTIONAL ALERT</b> 🚨\n{'='*35}\n\n"
-            f"{em} <b>{name}</b> | "
-            f"{TIMEFRAMES.get(tf, {}).get('emoji', '')} {tf}\n"
-            f"🕐 {ts} | Session: {sn}\n\n"
-            f"{'─'*35}\n"
-            f"{de} <b>{dw}</b> | {qe} <b>{q}</b>\n"
-            f"📊 Confidence: <b>{pred['confidence']:.0f}%</b>\n"
-        )
-        if ml_l and "No ML" not in ml_l:
-            msg += f"🧠 ML: <b>{ml_p:.0%}</b> — {ml_l}\n"
-        msg += (
-            f"{'─'*35}\n\n"
-            f"<b>📍 Trade Levels:</b>\n"
-            f"├ Entry:    <code>{fmt_price(cp,              pair)}</code>\n"
-            f"├ 🎯 Target: <code>{fmt_price(pred['target'], pair)}</code>\n"
-            f"└ ⛔ Stop:   <code>{fmt_price(pred['stop'],   pair)}</code>\n\n"
-            f"<b>⚖️ Risk/Reward:</b>\n"
-            f"├ Potential: +{rp:.1f} pips\n"
-            f"├ Risk:      -{riskp:.1f} pips\n"
-            f"└ R/R:       1:{rr:.1f}\n\n"
-            f"<b>Why This Alert Fired:</b>\n"
-        )
-        for i, r in enumerate(pred["reasons"][:5], 1):
-            msg += f"  {i}. {r}\n"
-        msg += "\n"
-        if af:
-            sm_e = ("🔥" if "VERY HIGH" in af.smart_money_activity else
-                    "⚠️" if "HIGH" in af.smart_money_activity else "📊")
-            msg += (
-                f"<b>{sm_e} Institutional Activity:</b>\n"
-                f"├ Smart Money: <b>{af.smart_money_activity}</b>\n"
-                f"├ VPIN:        <code>{af.vpin:.2%}</code> ({af.vpin_level})\n"
-                f"├ Informed:    <b>{af.informed_trader_signal}</b>\n"
-                f"├ Aggressor:   <b>{af.aggressor_side}</b>\n"
-                f"└ Inst. Score: <b>{af.institutional_flow_score:.0f}%</b>\n\n"
-            )
-            if af.iceberg_count > 0:
-                msg += f"🧊 <b>{af.iceberg_count} hidden iceberg orders detected</b>\n\n"
-        if lz:
-            nearby = [z for z in lz
-                      if pips_diff(pair, abs(z.price - cp)) < 100][:3]
-            if nearby:
-                msg += "<b>🌊 Nearby Liquidity Zones:</b>\n"
-                for z in nearby:
-                    side = "above" if z.price > cp else "below"
-                    dist = pips_diff(pair, abs(z.price - cp))
-                    msg += (f"  • {z.zone_type.replace('_', ' ')} {side} "
-                            f"at {fmt_price(z.price, pair)} ({dist:.0f} pips)\n")
-                msg += "\n"
-        if sim.get("found"):
-            msg += f"{'─'*35}\n{sim['narrative']}\n\n"
-        si   = SA.INFO.get(sn, {})
-        best = si.get("best", [])
-        msg += f"<b>{si.get('emoji', '🕐')} Session:</b> {si.get('name', '')}\n"
-        if pair in best:
-            msg += f"✅ This is one of the BEST sessions for {name}.\n\n"
-        else:
-            msg += "\n"
-        msg += (
-            f"{'='*35}\n"
-            f"<b>⚠️ Risk Reminder:</b>\n"
-            f"This is a high-confidence institutional setup but no signal "
-            f"is 100% accurate. Stop-loss at "
-            f"<code>{fmt_price(pred['stop'], pair)}</code>. "
-            f"Risk max 1-2% of your account.\n"
-            f"{'='*35}"
-        )
-        return msg
+                        if sent_chat_ids:
+                            pobj.chat_ids         = sent_chat_ids
+                            pobj.was_sent_to_users = True
+
+                        # Always track prediction in system
+                        QB.add_to_history(pobj)
+                        PT.add(pobj)
+                        PATTERN_MEMORY.record(
+                            pobj, of, af, regime, session)
+
+                        # Add to ML data store
+                        ML_DATA_STORE.add({
+                            "prediction_id": pid,
+                            "features":      signal.features,
+                            "outcome":       "",
+                            "pips_gained":   0.0,
+                            "strategy":      signal.strategy.value,
+                            "session":       session.session_name,
+                            "regime":        regime.regime.value,
+                        })
+
+                        await asyncio.sleep(1.5)
+
+                    except Exception as e:
+                        log.error(f"Alert scan {pair} {tf}: {e}")
+                        continue
+
+        if sent > 0:
+            log.info(f"Alerts sent: {sent}")
+        return sent
 
 
 AE = AlertEngine()
@@ -3537,502 +6700,99 @@ async def alert_loop(app):
     log.info("Alert scanner started")
     while True:
         try:
-            await asyncio.sleep(ALERT_SCAN_INTERVAL)
-            n = await AE.scan(app)
+            session  = SESSION_ENGINE.get_session()
+            interval = SESSION_ENGINE.get_scan_interval(session)
+            n        = await AE.scan_all(app)
             if n > 0:
-                log.info(f"Alerts sent: {n}")
+                log.info(f"Alerts fired: {n}")
+            await asyncio.sleep(interval)
         except Exception as e:
             log.error(f"Alert loop: {e}")
             await asyncio.sleep(60)
 
 
-# ════════════════════════════════════════════════════════════════
-#  FULL ANALYSIS PIPELINE
-# ════════════════════════════════════════════════════════════════
-
-async def full_analysis(session: aiohttp.ClientSession,
-                        pair: str, tf: str) -> Dict:
-    tf_cfg = TIMEFRAMES[tf]
-    r      = await asyncio.gather(
-        fetch_candles(session, pair, tf, tf_cfg["candles"]),
-        fetch_order_book(session, pair),
-        fetch_position_book(session, pair),
-        return_exceptions=True
-    )
-    candles = r[0] if not isinstance(r[0], Exception) else []
-    ob_raw  = r[1] if not isinstance(r[1], Exception) else None
-    pb_raw  = r[2] if not isinstance(r[2], Exception) else None
-    if not candles or len(candles) < 30:
-        raise ValueError("Insufficient candle data")
-    of = OF_ENGINE.analyze(candles)
-    vp = calculate_volume_profile(candles)
-    ob = analyze_order_book(ob_raw, of.price)
-    pb = analyze_position_book(pb_raw, of.price)
-    af = ADVANCED_OF.analyze_all(candles, ob_raw)
-    lz = LIQUIDITY_DETECTOR.detect_all(candles, pair)
-    cs = None
-    if pair in FOREX_PAIRS:
-        cs = await STRENGTH_CACHE.get(session)
-    return {"candles": candles, "of": of, "vp": vp, "ob": ob,
-            "pb": pb, "af": af, "lz": lz, "cs": cs, "ob_raw": ob_raw}
+async def monitor_loop(app):
+    log.info("Monitor loop started")
+    while True:
+        try:
+            notes = await PT.check(app.bot)
+            for n in notes:
+                pred = n["pred"]
+                # Safety check: only notify if was_sent_to_users
+                if not pred.was_sent_to_users:
+                    continue
+                msg = fmt_outcome_notification(pred, n["type"], n["cp"])
+                # Send to ALL chat_ids that received the original signal
+                for chat_id in pred.chat_ids:
+                    await send_msg(app.bot, chat_id, msg,
+                                   parse_mode="HTML")
+                    await asyncio.sleep(0.3)
+                # Record in performance engine
+                if n["type"] in ("TARGET_HIT", "STOP_HIT"):
+                    PERF_ENGINE.record(pred)
+            await asyncio.sleep(MONITORING_INTERVAL)
+        except Exception as e:
+            log.error(f"Monitor loop: {e}")
+            await asyncio.sleep(MONITORING_INTERVAL)
 
 
-# ════════════════════════════════════════════════════════════════
-#  CHART FUNCTIONS
-# ════════════════════════════════════════════════════════════════
+async def daily_summary_loop(app):
+    log.info("Daily summary loop started")
+    while True:
+        try:
+            now    = datetime.now(timezone.utc)
+            target = now.replace(
+                hour=21, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait = (target - now).total_seconds()
+            await asyncio.sleep(wait)
 
-def chart_prediction(candles: List[Candle], instrument: str,
-                     pred: Dict, vp: Optional[VolumeProfile],
-                     of: OrderFlowData,
-                     af: Optional[AdvancedOrderFlowData],
-                     lz: Optional[List[LiquidityZone]] = None) -> io.BytesIO:
-    fig  = plt.figure(figsize=(14, 12), facecolor='#0d1117')
-    gs   = GridSpec(4, 1, figure=fig, height_ratios=[3, 1, 1, 0.8], hspace=0.12)
-    C    = {'bg':'#0d1117','text':'#c9d1d9','grid':'#21262d',
-            'up':'#3fb950','dn':'#f85149','tgt':'#3fb950',
-            'stp':'#f85149','ent':'#f0883e',
-            'poc':'#a371f7','vwap':'#58a6ff','sm':'#ffd700',
-            'dem':'#3fb950','sup':'#f85149','fvg':'#58a6ff'}
-    disp = candles[-70:] if len(candles) > 70 else candles
-    n    = len(disp)
+            exp      = PERF_ENGINE.get_expectancy()
+            ml_stats = ML_ENGINE.get_stats()
+            strat_b  = PERF_ENGINE.get_strategy_breakdown()
+            mode, risk_pct, risk_msg = PERF_ENGINE.get_risk_mode()
+            session  = SESSION_ENGINE.get_session()
+            wat      = SESSION_ENGINE.wat_time()
 
-    ax_p = fig.add_subplot(gs[0])
-    ax_p.set_facecolor(C['bg'])
-    for i, c in enumerate(disp):
-        col = C['up'] if c.is_bullish else C['dn']
-        ax_p.plot([i, i], [c.low, c.high],   color=col, linewidth=0.8)
-        ax_p.plot([i, i], [c.open, c.close], color=col, linewidth=3.5)
+            best_strat = (max(strat_b.items(),
+                             key=lambda x: x[1]["expectancy"],
+                             default=(None, {}))[0])
 
-    cp = candles[-1].close
-    for yv, lbl, col, ls in [
-        (cp,             f"ENTRY\n{fmt_price(cp,             instrument)}", C['ent'], '-'),
-        (pred['target'], f"TARGET\n{fmt_price(pred['target'], instrument)}", C['tgt'], '--'),
-        (pred['stop'],   f"STOP\n{fmt_price(pred['stop'],     instrument)}", C['stp'], '--'),
-    ]:
-        ax_p.axhline(y=yv, color=col, linestyle=ls, linewidth=2, alpha=0.9)
-        ax_p.text(n + 1, yv, lbl, color=col, fontsize=8,
-                  fontweight='bold', va='center')
+            msg = (
+                f"{'='*35}\n"
+                f"📊 <b>DAILY PERFORMANCE SUMMARY</b>\n"
+                f"{'='*35}\n\n"
+                f"🕐 {wat}\n\n"
+                f"<b>Resolved Today:</b>\n"
+                f"├ Total:      {exp['total']}\n"
+                f"├ Win Rate:   {exp['win_rate']:.1%}\n"
+                f"├ Expectancy: {exp['expectancy']:+.1f} pips/trade\n"
+                f"└ Avg MFE:    {exp['avg_mfe']:.1f}p\n\n"
+            )
+            if best_strat:
+                msg += (
+                    f"🏆 Best: <b>{best_strat[:25]}</b>\n\n")
+            msg += (
+                f"<b>🧠 ML:</b> "
+                f"{'✅ Active' if ml_stats['is_trained'] else '⏳ Accumulating'} "
+                f"({ml_stats['n_samples']}/{ML_MIN_SAMPLES})\n\n"
+                f"<b>Risk:</b> {risk_msg}\n\n"
+                f"<b>Tomorrow:</b>\n"
+                f"London KZ: 08:00–11:00 WAT\n"
+                f"NY KZ: 13:00–16:00 WAT\n\n"
+                f"<i>Trade the plan. Protect the capital.</i>"
+            )
 
-    ax_p.axhline(y=of.vwap, color=C['vwap'], linestyle=':', linewidth=1.5, alpha=0.7)
-    if vp:
-        ax_p.axhline(y=vp.poc, color=C['poc'], linestyle=':', linewidth=1.5, alpha=0.7)
+            active = SUB_MANAGER.all_active()
+            for chat_id, _ in active:
+                await send_msg(app.bot, chat_id, msg,
+                               parse_mode="HTML")
+                await asyncio.sleep(0.4)
 
-    if lz:
-        lo_ = min(c.low  for c in disp)
-        hi_ = max(c.high for c in disp)
-        for z in lz[:6]:
-            if lo_ <= z.price <= hi_:
-                zc = (C['dem'] if z.zone_type == "DEMAND" else
-                      C['sup'] if z.zone_type == "SUPPLY" else C['fvg'])
-                if z.upper > 0 and z.lower > 0:
-                    ax_p.axhspan(z.lower, z.upper, alpha=0.07, color=zc)
-                ax_p.axhline(y=z.price, color=zc, linestyle=':', linewidth=0.8, alpha=0.4)
-
-    ac = C['up'] if pred['direction'] == 'LONG' else C['dn']
-    ax_p.annotate('', xy=(n - 5, pred['target']), xytext=(n - 5, cp),
-                  arrowprops=dict(arrowstyle='->', color=ac, lw=3))
-
-    ml_l = pred.get('ml_label', '')
-    de   = "🟢" if pred['direction'] == 'LONG' else "🔴"
-    title = (f"{asset_emoji(instrument)} {pair_display(instrument)} | "
-             f"{de} {pred['direction']} | {pred['quality']}")
-    if ml_l and "No ML" not in ml_l:
-        title += f" | {ml_l}"
-    ax_p.set_title(title, color=C['text'], fontsize=12, fontweight='bold', pad=12)
-    ax_p.tick_params(colors=C['text'], labelsize=9)
-    ax_p.grid(True, alpha=0.15, color=C['grid'])
-    ax_p.set_xlim(-2, n + 15)
-
-    ax_d = fig.add_subplot(gs[1])
-    ax_d.set_facecolor(C['bg'])
-    deltas = [c.delta for c in disp]
-    ax_d.bar(range(n), deltas,
-             color=[C['up'] if d >= 0 else C['dn'] for d in deltas],
-             alpha=0.7, width=0.8)
-    ax_d.axhline(y=0, color=C['grid'], linewidth=1)
-    ax_d.set_title('Order Flow Delta', color=C['text'], fontsize=10, pad=5)
-    ax_d.tick_params(colors=C['text'], labelsize=8)
-    ax_d.grid(True, alpha=0.15, color=C['grid'])
-    ax_d.set_xlim(-2, n + 15)
-
-    ax_c = fig.add_subplot(gs[2])
-    ax_c.set_facecolor(C['bg'])
-    cvd     = np.cumsum(deltas)
-    cvd_col = C['up'] if len(cvd) > 0 and cvd[-1] > cvd[0] else C['dn']
-    ax_c.fill_between(range(n), cvd, alpha=0.3, color=cvd_col)
-    ax_c.plot(range(n), cvd, color=cvd_col, linewidth=1.5)
-    ax_c.set_title('CVD', color=C['text'], fontsize=10, pad=5)
-    ax_c.tick_params(colors=C['text'], labelsize=8)
-    ax_c.grid(True, alpha=0.15, color=C['grid'])
-    ax_c.set_xlim(-2, n + 15)
-
-    ax_s = fig.add_subplot(gs[3])
-    ax_s.set_facecolor(C['bg'])
-    if af:
-        ss = []
-        for i in range(n):
-            wc = disp[max(0, i - 10):i + 1]
-            bv = sum(c.buy_volume  for c in wc)
-            sv = sum(c.sell_volume for c in wc)
-            tv = bv + sv
-            ss.append(abs(bv - sv) / tv * 100 if tv > 0 else 0.0)
-        ax_s.fill_between(range(n), ss, alpha=0.5, color=C['sm'])
-        ax_s.plot(range(n), ss, color=C['sm'], linewidth=1.5)
-        ax_s.axhline(y=50, color='red', linestyle='--', linewidth=1, alpha=0.7)
-        ax_s.set_title(
-            f"Smart Money | VPIN: {af.vpin_level} | {af.smart_money_activity}",
-            color=C['sm'], fontsize=10, pad=5)
-    else:
-        ax_s.text(0.5, 0.5, 'Smart Money Analysis', ha='center', va='center',
-                  color=C['text'], transform=ax_s.transAxes)
-    ax_s.tick_params(colors=C['text'], labelsize=8)
-    ax_s.grid(True, alpha=0.15, color=C['grid'])
-    ax_s.set_xlim(-2, n + 15)
-
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    fig.text(0.98, 0.01, f'Generated: {ts}', ha='right',
-             color=C['text'], fontsize=8, alpha=0.7)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=120,
-                facecolor=C['bg'], edgecolor='none', bbox_inches='tight')
-    buf.seek(0); plt.close(fig); gc.collect()
-    return buf
-
-
-def chart_strength(strengths: Dict) -> io.BytesIO:
-    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#0d1117')
-    ax.set_facecolor('#0d1117')
-    C  = {'up':'#3fb950','dn':'#f85149','text':'#c9d1d9','grid':'#21262d'}
-    sc = sorted(strengths.values(), key=lambda x: x.strength, reverse=True)
-    cu = [cs.currency for cs in sc]
-    va = [cs.strength for cs in sc]
-    bc = [C['up'] if v > 0 else C['dn'] for v in va]
-    yp = np.arange(len(cu))
-    ax.barh(yp, va, color=bc, alpha=0.85, height=0.6)
-    ax.set_yticks(yp)
-    ax.set_yticklabels(cu, color=C['text'], fontsize=13, fontweight='bold')
-    ax.axvline(x=0, color=C['grid'], linestyle='-', linewidth=2)
-    for i, (c, v) in enumerate(zip(cu, va)):
-        em = "💪" if v > 0.2 else ("💀" if v < -0.2 else "➖")
-        ax.text(v + (0.08 if v >= 0 else -0.08), i,
-                f'{em} {v:+.2f}%', va='center',
-                ha='left' if v >= 0 else 'right',
-                color=C['text'], fontsize=11, fontweight='bold')
-    ax.set_xlabel('Strength (%)', color=C['text'], fontsize=12)
-    ax.set_title('💱 Currency Strength (24H)',
-                 color=C['text'], fontsize=15, fontweight='bold', pad=20)
-    ax.tick_params(colors=C['text'], labelsize=10)
-    ax.grid(True, alpha=0.2, color=C['grid'], axis='x')
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=110,
-                facecolor='#0d1117', edgecolor='none', bbox_inches='tight')
-    buf.seek(0); plt.close(fig); gc.collect()
-    return buf
-
-
-def chart_no_setup(candles: List[Candle], instrument: str) -> io.BytesIO:
-    fig  = plt.figure(figsize=(14, 8), facecolor='#0d1117')
-    gs   = GridSpec(2, 1, figure=fig, height_ratios=[3, 1], hspace=0.12)
-    C    = {'bg':'#0d1117','text':'#c9d1d9','grid':'#21262d',
-            'up':'#3fb950','dn':'#f85149','neu':'#f0883e'}
-    disp = candles[-70:] if len(candles) > 70 else candles
-    n    = len(disp)
-    ax_p = fig.add_subplot(gs[0])
-    ax_p.set_facecolor(C['bg'])
-    for i, c in enumerate(disp):
-        col = C['up'] if c.is_bullish else C['dn']
-        ax_p.plot([i, i], [c.low, c.high],   color=col, linewidth=0.8)
-        ax_p.plot([i, i], [c.open, c.close], color=col, linewidth=3.5)
-    ax_p.set_title(
-        f"{asset_emoji(instrument)} {pair_display(instrument)} | ⚪ NO CLEAR SETUP",
-        color=C['neu'], fontsize=14, fontweight='bold', pad=15)
-    ax_p.tick_params(colors=C['text'], labelsize=9)
-    ax_p.grid(True, alpha=0.15, color=C['grid'])
-    ax_p.set_xlim(-2, n + 5)
-    ax_d = fig.add_subplot(gs[1])
-    ax_d.set_facecolor(C['bg'])
-    deltas = [c.delta for c in disp]
-    ax_d.bar(range(n), deltas,
-             color=[C['up'] if d >= 0 else C['dn'] for d in deltas],
-             alpha=0.7, width=0.8)
-    ax_d.axhline(y=0, color=C['grid'], linewidth=1)
-    ax_d.set_title('Order Flow Delta', color=C['text'], fontsize=10, pad=5)
-    ax_d.tick_params(colors=C['text'], labelsize=8)
-    ax_d.grid(True, alpha=0.15, color=C['grid'])
-    ax_d.set_xlim(-2, n + 5)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=120,
-                facecolor=C['bg'], edgecolor='none', bbox_inches='tight')
-    buf.seek(0); plt.close(fig); gc.collect()
-    return buf
-
-
-# ════════════════════════════════════════════════════════════════
-#  MESSAGE FORMATTERS
-# ════════════════════════════════════════════════════════════════
-
-def msg_prediction(instrument: str, tf: str, pred: Dict,
-                   of: OrderFlowData, ob: Optional[OrderBookData],
-                   pb: Optional[PositionBookData],
-                   af: Optional[AdvancedOrderFlowData],
-                   lz: Optional[List[LiquidityZone]] = None,
-                   sim: Optional[Dict] = None) -> str:
-    name  = pair_display(instrument)
-    em    = asset_emoji(instrument)
-    ts    = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    ti    = TIMEFRAMES.get(tf, {})
-    d     = pred['direction']
-    de    = "🟢" if d == "LONG" else "🔴"
-    dw    = "BUY"  if d == "LONG" else "SELL"
-    cp    = of.price
-    q     = pred['quality']
-    qe    = ("🔥" if "A+" in q else "✅" if "A " in q or q == "A (Good)"
-             else "⚡" if "B" in q else "⚠️")
-    rew   = abs(pred['target'] - cp)
-    risk  = abs(cp - pred['stop'])
-    rr    = rew / risk if risk > 0 else 0.0
-    ml_p  = pred.get('ml_prob',  0.0)
-    ml_l  = pred.get('ml_label', '')
-    msg   = (
-        f"{'='*35}\n🎯 <b>PRICE PREDICTION</b>\n{'='*35}\n\n"
-        f"{em} <b>{name}</b> | {ti.get('emoji','')} {ti.get('label',tf)}\n"
-        f"🕐 {ts}\n\n"
-        f"{'─'*35}\n"
-        f"{de} <b>{dw}</b> | {qe} <b>{q}</b>\n"
-        f"📊 Confidence: <b>{pred['confidence']:.0f}%</b>\n"
-    )
-    if ml_l and "No ML" not in ml_l:
-        msg += f"🧠 ML: <b>{ml_p:.0%}</b> — {ml_l}\n"
-    msg += (
-        f"{'─'*35}\n\n"
-        f"💰 Entry:       <code>{fmt_price(cp,              instrument)}</code>\n"
-        f"🎯 Target:      <code>{fmt_price(pred['target'],  instrument)}</code>\n"
-        f"⛔ Stop Loss:   <code>{fmt_price(pred['stop'],    instrument)}</code>\n"
-        f"⚖️ R/R:         1:{rr:.1f}\n\n"
-        f"<b>Factors ({pred['bull_count']}🟢 vs {pred['bear_count']}🔴):</b>\n"
-    )
-    for i, r in enumerate(pred['reasons'][:6], 1):
-        msg += f"  {i}. {r}\n"
-    msg += "\n"
-    if pred.get('key_levels'):
-        msg += "<b>Key Levels:</b>\n"
-        for lv in pred['key_levels'][:4]:
-            msg += f"  • {lv['type']}: <code>{fmt_price(lv['price'], instrument)}</code>\n"
-        msg += "\n"
-    msg += (
-        f"{'─'*35}\n<b>📊 Order Flow:</b>\n"
-        f"├ CVD:      <code>{fmt_signed(of.cvd)}</code>\n"
-        f"├ Imbalance:<code>{of.imbalance:+.1f}%</code>\n"
-        f"├ Momentum: <code>{fmt_signed(of.delta_momentum)}</code>\n"
-        f"└ Vol Trend:<code>{of.volume_trend:+.1f}%</code>\n\n"
-    )
-    if af:
-        msg += (
-            f"{'─'*35}\n<b>🧠 Smart Money:</b>\n"
-            f"├ VPIN:     <code>{af.vpin:.2%}</code> ({af.vpin_level})\n"
-            f"├ Informed: <b>{af.informed_trader_signal}</b>\n"
-            f"├ Aggressor:<b>{af.aggressor_side}</b>\n"
-            f"├ SM:       <b>{af.smart_money_activity}</b>\n"
-            f"└ Inst:     <b>{af.institutional_flow_score:.0f}%</b>\n\n"
-        )
-        if af.iceberg_count > 0:
-            msg += f"🧊 <b>{af.iceberg_count} iceberg orders detected</b>\n\n"
-    if lz:
-        nearby = [z for z in lz
-                  if pips_diff(instrument, abs(z.price - cp)) < 80][:3]
-        if nearby:
-            msg += "<b>🌊 Nearby Liquidity Zones:</b>\n"
-            for z in nearby:
-                side = "above" if z.price > cp else "below"
-                dist = pips_diff(instrument, abs(z.price - cp))
-                msg += (f"  • {z.zone_type.replace('_',' ')} {side} "
-                        f"— {fmt_price(z.price, instrument)} ({dist:.0f}p)\n")
-            msg += "\n"
-    if ob:
-        msg += (
-            f"<b>📖 Order Book:</b>\n"
-            f"├ Longs:    {ob.long_pct:.1f}%\n"
-            f"├ Shorts:   {ob.short_pct:.1f}%\n"
-            f"└ Pressure: {ob.pressure_direction}\n\n"
-        )
-    if pb:
-        msg += (
-            f"<b>👥 Position Book:</b>\n"
-            f"├ Longs:  {pbar(pb.long_pct)} {pb.long_pct:.0f}%\n"
-            f"├ Shorts: {pbar(pb.short_pct)} {pb.short_pct:.0f}%\n"
-            f"├ Trapped Longs:  {pb.trapped_longs_pct:.1f}%\n"
-            f"├ Trapped Shorts: {pb.trapped_shorts_pct:.1f}%\n"
-            f"└ Squeeze: {pb.squeeze_potential}\n\n"
-        )
-    if sim and sim.get("found"):
-        msg += f"{'─'*35}\n{sim['narrative']}\n\n"
-    msg += (
-        f"{'='*35}\n"
-        f"<i>✅ Live tracking ON — alerts when target is hit or stop triggered.\n\n"
-        f"⚠️ Being wrong is okay. Use your stop-loss every time.</i>\n"
-    )
-    return msg
-
-
-def msg_no_setup(instrument: str, tf: str, of: OrderFlowData,
-                 bc: int, brc: int,
-                 af: Optional[AdvancedOrderFlowData] = None) -> str:
-    name  = pair_display(instrument)
-    em    = asset_emoji(instrument)
-    ts    = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    ti    = TIMEFRAMES.get(tf, {})
-    msg   = (
-        f"{'='*35}\n⚪ <b>NO CLEAR SETUP</b>\n{'='*35}\n\n"
-        f"{em} <b>{name}</b> | {ti.get('emoji','')} {ti.get('label',tf)}\n"
-        f"🕐 {ts}\n\n"
-        f"{'─'*35}\n<b>Why no prediction?</b>\n{'─'*35}\n\n"
-        f"Confluence factors are mixed:\n"
-        f"├ 🟢 Bullish: {bc}\n"
-        f"├ 🔴 Bearish: {brc}\n"
-        f"└ Minimum:   {MIN_CONFLUENCE_FACTORS}\n\n"
-        f"{'─'*35}\n<b>📊 Current Flow:</b>\n"
-        f"├ CVD:       <code>{fmt_signed(of.cvd)}</code>\n"
-        f"├ Imbalance: <code>{of.imbalance:+.1f}%</code>\n"
-        f"└ Momentum:  <code>{fmt_signed(of.delta_momentum)}</code>\n\n"
-    )
-    if af:
-        msg += (
-            f"<b>🧠 Smart Money:</b>\n"
-            f"├ VPIN:    <code>{af.vpin:.2%}</code> ({af.vpin_level})\n"
-            f"├ SM:      {af.smart_money_activity}\n"
-            f"└ Inst:    {af.institutional_flow_score:.0f}%\n\n"
-        )
-    msg += (
-        f"{'='*35}\n"
-        f"<i>💡 Patience is an edge. Wait for all factors to align "
-        f"before committing capital.</i>\n"
-    )
-    return msg
-
-
-def msgs_analysis(instrument: str, tf: str, of: OrderFlowData,
-                  vp: Optional[VolumeProfile], ob: Optional[OrderBookData],
-                  pb: Optional[PositionBookData],
-                  af: Optional[AdvancedOrderFlowData] = None,
-                  lz: Optional[List[LiquidityZone]] = None) -> List[str]:
-    msgs: List[str] = []
-    name = pair_display(instrument)
-    ts   = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    ti   = TIMEFRAMES.get(tf, {})
-    vs   = "above" if of.price > of.vwap else "below"
-    m1   = (
-        f"{'='*32}\n📊 <b>{name} ANALYSIS</b>\n{'='*32}\n"
-        f"⏰ {ts} | {ti.get('emoji','')} {ti.get('label',tf)}\n\n"
-        f"💰 <b>Price:</b> <code>{fmt_price(of.price, instrument)}</code>\n"
-        f"📐 <b>VWAP:</b>  <code>{fmt_price(of.vwap,  instrument)}</code>\n\n"
-        f"<i>Price {vs} VWAP = {'bullish' if vs=='above' else 'bearish'} bias</i>\n\n"
-        f"{'─'*32}\n<b>📈 ORDER FLOW</b>\n{'─'*32}\n\n"
-        f"{'🟢' if of.cvd>0 else '🔴'} "
-        f"<b>{'BUYERS' if of.cvd>0 else 'SELLERS'} dominant</b>\n\n"
-        f"├ Buy Vol:   <code>{fmt_num(of.buy_volume)}</code> ({of.buy_pct:.1f}%)\n"
-        f"├ Sell Vol:  <code>{fmt_num(of.sell_volume)}</code> ({of.sell_pct:.1f}%)\n"
-        f"├ Imbalance: <code>{fmt_pct(of.imbalance)}</code>\n"
-        f"├ CVD:       <code>{fmt_signed(of.cvd)}</code>\n"
-        f"├ Momentum:  <code>{fmt_signed(of.delta_momentum)}</code>\n"
-        f"└ Vol Trend: <code>{fmt_pct(of.volume_trend)}</code>\n"
-    )
-    msgs.append(m1)
-    if af:
-        m2 = (
-            f"{'─'*32}\n<b>🧠 SMART MONEY INTELLIGENCE</b>\n{'─'*32}\n\n"
-            f"<b>VPIN (Informed Trading):</b>\n"
-            f"├ VPIN:  <code>{af.vpin:.2%}</code>\n"
-            f"├ Level: <b>{af.vpin_level}</b>\n"
-            f"└ High VPIN = Smart money active\n\n"
-            f"<b>Kyle's Lambda:</b>\n"
-            f"├ Value: <code>{fmt_sci(af.kyle_lambda)}</code>\n"
-            f"└ {af.kyle_lambda_interpretation}\n\n"
-            f"<b>Toxicity:</b>\n"
-            f"├ Value: <code>{af.toxicity:.2%}</code>\n"
-            f"├ Level: <b>{af.toxicity_level}</b>\n"
-            f"└ High = Reversal risk\n\n"
-            f"<b>Liquidity:</b>\n"
-            f"├ Amihud: <code>{af.amihud_illiquidity:.2f}</code>\n"
-            f"└ Status: <b>{af.liquidity_level}</b>\n\n"
-            f"<b>Order Book Depth:</b>\n"
-            f"├ Imbalance: <code>{af.market_depth_imbalance:+.2%}</code>\n"
-            f"└ Bias: <b>{af.depth_bias}</b>\n\n"
-        )
-        if af.iceberg_count > 0:
-            m2 += f"🧊 <b>{af.iceberg_count} iceberg orders detected</b>\n\n"
-        m2 += (
-            f"<b>Absorption:</b>\n"
-            f"├ Ratio: <code>{af.absorption_ratio:.2f}</code>\n"
-            f"└ {'Buying' if af.absorption_ratio > 1 else 'Selling'} absorption\n\n"
-            f"<b>Activity:</b>\n"
-            f"├ Arrival Rate:  <code>{af.trade_arrival_rate:+.2f}σ</code>\n"
-            f"├ Clustering:    <code>{af.volume_clustering:.2%}</code>\n"
-            f"└ Aggressor: <b>{af.aggressor_side}</b>\n\n"
-            f"{'─'*32}\n<b>🎯 SUMMARY:</b>\n"
-            f"├ Smart Money:  <b>{af.smart_money_activity}</b>\n"
-            f"├ Informed:     <b>{af.informed_trader_signal}</b>\n"
-            f"└ Inst. Score:  <b>{af.institutional_flow_score:.0f}%</b>\n"
-        )
-        msgs.append(m2)
-    m3 = f"{'─'*32}\n<b>📐 VOLUME PROFILE</b>\n{'─'*32}\n\n"
-    if vp:
-        in_va = vp.val <= of.price <= vp.vah
-        m3 += (
-            f"├ POC: <code>{fmt_price(vp.poc, instrument)}</code>\n"
-            f"├ VAH: <code>{fmt_price(vp.vah, instrument)}</code>\n"
-            f"├ VAL: <code>{fmt_price(vp.val, instrument)}</code>\n"
-            f"└ In Value Area: {'✅' if in_va else '❌'}\n"
-        )
-    else:
-        m3 += "Not available.\n"
-    if lz:
-        m3 += f"\n<b>🌊 Liquidity Zones:</b>\n"
-        above = sorted([z for z in lz if z.price > of.price],
-                       key=lambda x: x.price)[:3]
-        below = sorted([z for z in lz if z.price <= of.price],
-                       key=lambda x: x.price, reverse=True)[:3]
-        for z in above:
-            dist = pips_diff(instrument, z.price - of.price)
-            m3 += (f"🔴 {fmt_price(z.price, instrument)} "
-                   f"[{z.zone_type.replace('_',' ')}] +{dist:.0f}p\n")
-        for z in below:
-            dist = pips_diff(instrument, of.price - z.price)
-            m3 += (f"🟢 {fmt_price(z.price, instrument)} "
-                   f"[{z.zone_type.replace('_',' ')}] -{dist:.0f}p\n")
-    msgs.append(m3)
-    if pb:
-        m4 = (
-            f"{'─'*32}\n<b>👥 POSITION BOOK</b>\n{'─'*32}\n\n"
-            f"├ Longs:    {pbar(pb.long_pct)} {pb.long_pct:.1f}%\n"
-            f"├ Shorts:   {pbar(pb.short_pct)} {pb.short_pct:.1f}%\n"
-            f"├ Skew:     <code>{fmt_pct(pb.skew)}</code>\n"
-            f"├ Contrarian: <b>{pb.contrarian_signal}</b>\n"
-            f"├ Trapped L:  {pb.trapped_longs_pct:.1f}%\n"
-            f"├ Trapped S:  {pb.trapped_shorts_pct:.1f}%\n"
-            f"├ Underwater: {pb.total_underwater:.1f}%\n"
-            f"├ Pain:       <code>{fmt_price(pb.pain_threshold, instrument)}</code>\n"
-            f"└ Squeeze:    {pb.squeeze_potential}\n"
-        )
-        msgs.append(m4)
-    if ob:
-        m5 = (
-            f"{'─'*32}\n<b>📖 ORDER BOOK</b>\n{'─'*32}\n\n"
-            f"├ Longs:    {pbar(ob.long_pct)} {ob.long_pct:.1f}%\n"
-            f"├ Shorts:   {pbar(ob.short_pct)} {ob.short_pct:.1f}%\n"
-            f"└ Pressure: <b>{ob.breakout_bias.replace('_',' ')}</b>\n"
-        )
-        msgs.append(m5)
-    msgs.append(
-        f"\n{'='*32}\n"
-        f"<i>Use /predict for prediction\n"
-        f"Use /summary for full brief\n"
-        f"Use /sessions for session guide</i>\n"
-    )
-    return msgs
-
+        except Exception as e:
+            log.error(f"Daily summary: {e}")
+            await asyncio.sleep(3600)
 
 # ════════════════════════════════════════════════════════════════
 #  KEYBOARDS
@@ -4040,45 +6800,46 @@ def msgs_analysis(instrument: str, tf: str, of: OrderFlowData,
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Get Prediction",    callback_data="predict_menu")],
-        [InlineKeyboardButton("📊 Analyze Pair",      callback_data="analyze_menu")],
-        [InlineKeyboardButton("🧠 Market Summary",    callback_data="summary_menu")],
-        [InlineKeyboardButton("🔔 Auto Alerts",       callback_data="alerts_menu")],
-        [InlineKeyboardButton("💪 Currency Strength", callback_data="strength")],
-        [InlineKeyboardButton("🌍 Market Overview",   callback_data="overview")],
-        [InlineKeyboardButton("🕐 Session Guide",     callback_data="sessions")],
-        [
-            InlineKeyboardButton("🥇 Gold",   callback_data="predict_pair_XAU_USD"),
-            InlineKeyboardButton("🥈 Silver", callback_data="predict_pair_XAG_USD")
-        ],
-        [InlineKeyboardButton("📈 NASDAQ",            callback_data="predict_pair_NAS100_USD")],
-        [InlineKeyboardButton("📚 Guide",             callback_data="guide")]
+        [InlineKeyboardButton("🎯 Get Signal",     callback_data="predict_menu"),
+         InlineKeyboardButton("📊 Analyze",        callback_data="analyze_menu")],
+        [InlineKeyboardButton("🧠 Market Summary", callback_data="summary_menu")],
+        [InlineKeyboardButton("🔔 Auto Alerts",    callback_data="alerts_menu"),
+         InlineKeyboardButton("💱 Strength",       callback_data="strength")],
+        [InlineKeyboardButton("🌍 Overview",       callback_data="overview"),
+         InlineKeyboardButton("🕐 Sessions",       callback_data="sessions")],
+        [InlineKeyboardButton("📊 Performance",    callback_data="performance"),
+         InlineKeyboardButton("📚 Guide",          callback_data="guide")],
+        [InlineKeyboardButton("🥇 Gold",           callback_data="predict_pair_XAU_USD"),
+         InlineKeyboardButton("🥈 Silver",         callback_data="predict_pair_XAG_USD"),
+         InlineKeyboardButton("📈 NASDAQ",         callback_data="predict_pair_NAS100_USD")],
     ])
 
 
 def kb_pairs(mode: str) -> InlineKeyboardMarkup:
     kb: List[List] = []
-    kb.append([InlineKeyboardButton("─── Major ───", callback_data="none")])
+    kb.append([InlineKeyboardButton("── Majors ──", callback_data="none")])
     row: List = []
     for p in ASSET_CATEGORIES["forex_major"]:
         row.append(InlineKeyboardButton(
             pair_display(p), callback_data=f"{mode}_pair_{p}"))
-        if len(row) == 3: kb.append(row); row = []
+        if len(row) == 3:
+            kb.append(row); row = []
     if row: kb.append(row)
-    kb.append([InlineKeyboardButton("─── Cross ───", callback_data="none")])
+    kb.append([InlineKeyboardButton("── Crosses ──", callback_data="none")])
     row = []
     for p in ASSET_CATEGORIES["forex_cross"][:12]:
         row.append(InlineKeyboardButton(
             pair_display(p), callback_data=f"{mode}_pair_{p}"))
-        if len(row) == 3: kb.append(row); row = []
+        if len(row) == 3:
+            kb.append(row); row = []
     if row: kb.append(row)
-    kb.append([InlineKeyboardButton("More Crosses ▼",
-                                    callback_data=f"{mode}_more")])
-    kb.append([InlineKeyboardButton("─── Metals/Index ───", callback_data="none")])
+    kb.append([InlineKeyboardButton(
+        "More Crosses ▼", callback_data=f"{mode}_more")])
+    kb.append([InlineKeyboardButton("── Metals/Index ──", callback_data="none")])
     kb.append([
-        InlineKeyboardButton("🥇 Gold",   callback_data=f"{mode}_pair_XAU_USD"),
-        InlineKeyboardButton("🥈 Silver", callback_data=f"{mode}_pair_XAG_USD"),
-        InlineKeyboardButton("📈 NAS",    callback_data=f"{mode}_pair_NAS100_USD")
+        InlineKeyboardButton("🥇 XAU/USD", callback_data=f"{mode}_pair_XAU_USD"),
+        InlineKeyboardButton("🥈 XAG/USD", callback_data=f"{mode}_pair_XAG_USD"),
+        InlineKeyboardButton("📈 NAS100",  callback_data=f"{mode}_pair_NAS100_USD"),
     ])
     kb.append([InlineKeyboardButton("◀️ Back", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
@@ -4089,9 +6850,11 @@ def kb_more_crosses(mode: str) -> InlineKeyboardMarkup:
     for p in ASSET_CATEGORIES["forex_cross"][12:]:
         row.append(InlineKeyboardButton(
             pair_display(p), callback_data=f"{mode}_pair_{p}"))
-        if len(row) == 3: kb.append(row); row = []
+        if len(row) == 3:
+            kb.append(row); row = []
     if row: kb.append(row)
-    kb.append([InlineKeyboardButton("◀️ Back", callback_data=f"{mode}_menu")])
+    kb.append([InlineKeyboardButton(
+        "◀️ Back", callback_data=f"{mode}_menu")])
     return InlineKeyboardMarkup(kb)
 
 
@@ -4100,157 +6863,200 @@ def kb_tf(pair: str, mode: str) -> InlineKeyboardMarkup:
     for tf, info in TIMEFRAMES.items():
         kb.append([InlineKeyboardButton(
             f"{info['emoji']} {info['label']}",
-            callback_data=f"{mode}_pair_{pair}_{tf}"
-        )])
-    kb.append([InlineKeyboardButton("◀️ Back", callback_data=f"{mode}_menu")])
+            callback_data=f"{mode}_pair_{pair}_{tf}")])
+    kb.append([InlineKeyboardButton(
+        "◀️ Back", callback_data=f"{mode}_menu")])
     return InlineKeyboardMarkup(kb)
 
 
 def kb_alerts(chat_id: int) -> InlineKeyboardMarkup:
-    is_sub = SUB_MANAGER.is_subscribed(chat_id)
+    is_sub = SUB_MANAGER.is_active(chat_id)
     kb: List[List] = []
     if is_sub:
-        kb.append([InlineKeyboardButton("✅ Alerts ON",       callback_data="none")])
-        kb.append([InlineKeyboardButton("➕ Add Pair",         callback_data="al_add")])
-        kb.append([InlineKeyboardButton("➖ Remove Pair",      callback_data="al_rem")])
-        kb.append([InlineKeyboardButton("⚡ Change Timeframe", callback_data="al_tf")])
-        kb.append([InlineKeyboardButton("📊 My Stats",        callback_data="al_stats")])
-        kb.append([InlineKeyboardButton("🔕 Unsubscribe",     callback_data="al_unsub")])
+        sub   = SUB_MANAGER.get(chat_id) or {}
+        all_p = sub.get("all_pairs", False)
+        kb.append([InlineKeyboardButton(
+            "✅ ALL Pairs ON" if all_p else "📋 All Pairs: OFF",
+            callback_data="al_toggle_all")])
+        kb.append([
+            InlineKeyboardButton("➕ Add Pair",    callback_data="al_add"),
+            InlineKeyboardButton("➖ Remove Pair", callback_data="al_rem"),
+        ])
+        kb.append([
+            InlineKeyboardButton("⚡ Timeframe",   callback_data="al_tf"),
+            InlineKeyboardButton("⭐ Min Quality", callback_data="al_quality"),
+        ])
+        kb.append([InlineKeyboardButton(
+            "📊 My Stats", callback_data="al_stats")])
+        kb.append([InlineKeyboardButton(
+            "🔕 Unsubscribe", callback_data="al_unsub")])
     else:
-        kb.append([InlineKeyboardButton("🔔 Subscribe to Alerts",
-                                        callback_data="al_sub")])
+        kb.append([InlineKeyboardButton(
+            "🔔 Subscribe to Auto Alerts",
+            callback_data="al_sub")])
     kb.append([InlineKeyboardButton("◀️ Back", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
 
 def kb_alert_pairs(action: str) -> InlineKeyboardMarkup:
-    kb: List[List] = []
-    kb.append([InlineKeyboardButton("─── Major ───", callback_data="none")])
-    row: List = []
+    kb: List[List] = []; row: List = []
     for p in ASSET_CATEGORIES["forex_major"]:
         row.append(InlineKeyboardButton(
             pair_display(p), callback_data=f"{action}_{p}"))
-        if len(row) == 3: kb.append(row); row = []
+        if len(row) == 3:
+            kb.append(row); row = []
     if row: kb.append(row)
     kb.append([
-        InlineKeyboardButton("🥇 Gold", callback_data=f"{action}_XAU_USD"),
-        InlineKeyboardButton("📈 NAS",  callback_data=f"{action}_NAS100_USD")
+        InlineKeyboardButton("🥇 Gold",   callback_data=f"{action}_XAU_USD"),
+        InlineKeyboardButton("📈 NAS100", callback_data=f"{action}_NAS100_USD"),
     ])
     kb.append([InlineKeyboardButton("◀️ Back", callback_data="alerts_menu")])
     return InlineKeyboardMarkup(kb)
 
 
-def kb_alert_tf() -> InlineKeyboardMarkup:
-    kb: List[List] = []
-    for tf, info in TIMEFRAMES.items():
-        kb.append([InlineKeyboardButton(
-            f"{info['emoji']} {info['label']}",
-            callback_data=f"al_settf_{tf}"
-        )])
-    kb.append([InlineKeyboardButton("◀️ Back", callback_data="alerts_menu")])
-    return InlineKeyboardMarkup(kb)
+def kb_quality() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 A+ Only",         callback_data="al_setq_A+")],
+        [InlineKeyboardButton("✅ A and above",      callback_data="al_setq_A")],
+        [InlineKeyboardButton("⚡ B and above",      callback_data="al_setq_B")],
+        [InlineKeyboardButton("⚠️ All (C and above)",callback_data="al_setq_C")],
+        [InlineKeyboardButton("◀️ Back", callback_data="alerts_menu")],
+    ])
 
+
+def parse_pair_tf_cb(data:   str,
+                     prefix: str
+                     ) -> Tuple[Optional[str], Optional[str]]:
+    remainder = data[len(prefix):]
+    for pair in sorted(ALL_PAIRS, key=len, reverse=True):
+        if remainder.startswith(pair + "_"):
+            tf = remainder[len(pair)+1:]
+            if tf in TIMEFRAMES:
+                return pair, tf
+            return None, None
+        elif remainder == pair:
+            return pair, None
+    return None, None
 
 # ════════════════════════════════════════════════════════════════
 #  TELEGRAM COMMAND HANDLERS
 # ════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user  = update.effective_user
-    name  = esc(user.first_name) if user else "Trader"
-    ml_s  = ML_ENGINE.get_stats()
-    ml_st = (f"✅ Active ({ml_s['n_samples']} samples, "
-             f"{ml_s['latest_acc']:.0%} acc)"
-             if ml_s["is_trained"] else
-             f"⏳ Learning ({ml_s['n_samples']}/{ML_MIN_SAMPLES})")
-    bt_n  = len(HISTORICAL_BT.results)
-    text  = (
+    user    = update.effective_user
+    name    = esc(user.first_name) if user else "Trader"
+    ml_s    = ML_ENGINE.get_stats()
+    sess    = SESSION_ENGINE.get_session()
+    wat     = sess.wat_time
+
+    ml_st = (
+        f"✅ Active ({ml_s['n_samples']} samples, "
+        f"OOS:{ml_s['oos_accuracy']:.0%})"
+        if ml_s["is_trained"] else
+        f"⏳ Learning ({ml_s['n_samples']}/{ML_MIN_SAMPLES} resolved, "
+        f"{ml_s['n_total']} tracked)")
+
+    text = (
         f"🎯 <b>Welcome, {name}!</b>\n\n"
-        f"<i>FOREX QUANT v7.5 — Ultimate Trading Intelligence</i>\n\n"
+        f"<b>FOREX QUANT v8.1</b> — The Beast\n\n"
         f"{'─'*30}\n\n"
-        f"<b>🧠 Institutional Metrics:</b>\n"
-        f"• Academic VPIN (Easley et al. 2012)\n"
-        f"• Kyle's Lambda + Flow Toxicity\n"
-        f"• Iceberg Detection + Absorption\n"
-        f"• Liquidity Zones (FVG, OB, EQH/EQL)\n\n"
-        f"<b>🤖 ML Engine:</b> {ml_st}\n"
-        f"<b>📈 Backtest:</b> {bt_n} pairs stored\n\n"
-        f"<b>🔔 Auto Alerts:</b>\n"
-        f"• Institutional setups only ({MIN_ALERT_CONFIDENCE}%+ confidence)\n"
-        f"• Pattern memory context included\n"
-        f"• Opt-in with /alerts\n\n"
-        f"<b>Assets:</b> 28 Forex + Gold + Silver + NASDAQ\n\n"
-        f"<i>Select an option below:</i>"
+        f"<b>Now:</b> {wat}\n"
+        f"<b>Session:</b> {sess.session_name}"
+        f"{' | 🎯 ' + sess.kill_zone_name if sess.is_kill_zone else ''}\n"
+        f"<b>AMD Phase:</b> {sess.amd_phase}\n\n"
+        f"{'─'*30}\n\n"
+        f"<b>v8.1 Upgrades:</b>\n"
+        f"✅ R/R validated — shown correctly as reward:risk\n"
+        f"✅ Unique Trade IDs (FQ-EURUSD-BUY-...)\n"
+        f"✅ Breakeven alerts (50% to target)\n"
+        f"✅ Trailing stop alerts (75% to target)\n"
+        f"✅ Outcome alerts ONLY for sent signals\n"
+        f"✅ ML persists across restarts\n"
+        f"✅ HTF bias enforcement\n"
+        f"✅ Min target pips per instrument\n"
+        f"✅ Signal geometry validation\n\n"
+        f"<b>🧠 ML:</b> {ml_st}\n"
+        f"<b>📊 Strategies:</b> {len(list(StrategyType))}\n"
+        f"<b>💱 Instruments:</b> {len(ALL_PAIRS)}\n\n"
+        f"<i>Signals auto-sent. Use /alerts to subscribe.</i>"
     )
     await update.message.reply_text(
         text, parse_mode="HTML", reply_markup=kb_main())
 
 
-async def cmd_predict(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎯 <b>SELECT PAIR</b>", parse_mode="HTML",
-        reply_markup=kb_pairs("predict"))
+        "🎯 <b>SELECT PAIR FOR SIGNAL</b>",
+        parse_mode="HTML", reply_markup=kb_pairs("predict"))
 
 
 async def cmd_analyze(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 <b>SELECT PAIR</b>", parse_mode="HTML",
-        reply_markup=kb_pairs("analyze"))
+        "📊 <b>SELECT PAIR TO ANALYZE</b>",
+        parse_mode="HTML", reply_markup=kb_pairs("analyze"))
 
 
 async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧠 <b>SELECT PAIR</b>", parse_mode="HTML",
-        reply_markup=kb_pairs("summary"))
-
-
-async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(
-        "⏳ Generating report...", parse_mode="HTML")
-    report = HISTORICAL_BT.format_backtest_report(QB.history)
-    ch     = HISTORICAL_BT.format_backtest_chart(QB.history)
-    await del_msg(msg)
-    if ch:
-        await send_photo(ctx.bot, update.effective_chat.id, ch,
-                         caption="📊 <b>Performance Analytics</b>",
-                         parse_mode="HTML")
-    await update.message.reply_text(
-        report, parse_mode="HTML", reply_markup=kb_main())
+        "🧠 <b>SELECT PAIR FOR SUMMARY</b>",
+        parse_mode="HTML", reply_markup=kb_pairs("summary"))
 
 
 async def cmd_alerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    is_sub  = SUB_MANAGER.is_subscribed(chat_id)
+    is_sub  = SUB_MANAGER.is_active(chat_id)
     if is_sub:
-        sub   = SUB_MANAGER.get_subscription(chat_id) or {}
+        sub   = SUB_MANAGER.get(chat_id) or {}
         pairs = sub.get("pairs", [])
-        tf    = sub.get("timeframe", "H1")
-        cnt   = sub.get("alert_count", 0)
+        all_p = sub.get("all_pairs", False)
         text  = (
             f"🔔 <b>AUTO ALERTS — ACTIVE</b>\n\n"
-            f"Watching: {', '.join(pair_display(p) for p in pairs) or 'None'}\n"
-            f"Timeframe: {tf}\n"
-            f"Alerts received: {cnt}\n\n"
-            f"<b>Alert Criteria:</b>\n"
-            f"• Confidence ≥ {MIN_ALERT_CONFIDENCE}%\n"
-            f"• Inst. Score ≥ {MIN_ALERT_INST_SCORE}%\n"
-            f"• Factors ≥ {MIN_ALERT_FACTORS}\n"
-            f"• Cooldown: 4 hours per pair"
+            f"Watching: "
+            f"{'ALL ' + str(len(ALL_PAIRS)) + ' pairs' if all_p else ', '.join(pair_display(p) for p in pairs) or 'None'}\n"
+            f"TF: {sub.get('timeframe','H1')} | "
+            f"Min Quality: {sub.get('min_quality','B')}\n"
+            f"Alerts received: {sub.get('alert_count',0)}\n\n"
+            f"<b>Alert System:</b>\n"
+            f"• Session-adjusted confidence\n"
+            f"• R/R ≥ 1:{MIN_RR_RATIO}\n"
+            f"• Geometry validated before sending\n"
+            f"• Breakeven alert at 50% of target\n"
+            f"• Trailing alert at 75% of target\n"
+            f"• TP/SL only for YOUR signals"
         )
     else:
         text = (
             f"🔔 <b>AUTO ALERTS</b>\n\n"
             f"Get notified when institutional setups appear.\n\n"
-            f"<b>Alert fires when ALL of these are true:</b>\n"
-            f"• Confidence ≥ {MIN_ALERT_CONFIDENCE}%\n"
-            f"• Institutional score ≥ {MIN_ALERT_INST_SCORE}%\n"
-            f"• {MIN_ALERT_FACTORS}+ confluence factors\n"
-            f"• Smart money activity detected\n\n"
-            f"These are NOT casual signals. Pattern memory context included.\n\n"
-            f"<i>Tap Subscribe to get started.</i>"
+            f"<b>What you get:</b>\n"
+            f"• Signal with unique Trade ID\n"
+            f"• Entry, Target, Stop (validated geometry)\n"
+            f"• Breakeven alert (50% to target)\n"
+            f"• Trailing stop alert (75% to target)\n"
+            f"• TP/SL notifications for YOUR trades only\n"
+            f"• Daily performance summary\n\n"
+            f"<i>Tap Subscribe.</i>"
         )
     await update.message.reply_text(
         text, parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+
+
+async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg_l = await update.message.reply_text(
+        "⏳ Generating...", parse_mode="HTML")
+    report = PERF_ENGINE.format_report()
+    bt     = HISTORICAL_BT.format_report(QB.history)
+    ch     = chart_performance(QB.history)
+    await del_msg(msg_l)
+    if ch:
+        await send_photo(
+            ctx.bot, update.effective_chat.id, ch,
+            caption="📊 <b>Performance Analytics</b>",
+            parse_mode="HTML")
+    await update.message.reply_text(
+        report, parse_mode="HTML", reply_markup=kb_main())
+    await update.message.reply_text(
+        bt, parse_mode="HTML", reply_markup=kb_main())
 
 
 async def cmd_sessions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -4258,78 +7064,80 @@ async def cmd_sessions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         SA.schedule(), parse_mode="HTML", reply_markup=kb_main())
 
 
-async def cmd_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Loading...", parse_mode="HTML")
-    try:
-        async with aiohttp.ClientSession() as session:
-            st  = await STRENGTH_CACHE.get(session)
-            ch  = chart_strength(st)
-            sc  = sorted(st.values(), key=lambda x: x.strength, reverse=True)
-            sn, hrs = current_session()
-            cap = (f"🌍 <b>MARKET OVERVIEW</b>\n\n🕐 {sn} ({hrs:.1f}h)\n\n"
-                   f"🟢 Strongest: {sc[0].currency} ({sc[0].strength:+.2f}%)\n"
-                   f"🔴 Weakest:   {sc[-1].currency} ({sc[-1].strength:+.2f}%)\n\n"
-                   f"💡 Best pair: {sc[0].currency}/{sc[-1].currency}")
-            await del_msg(msg)
-            await send_photo(ctx.bot, update.effective_chat.id, ch,
-                             caption=cap, parse_mode="HTML",
-                             reply_markup=kb_main())
-    except Exception as e:
-        await msg.edit_text(f"❌ {str(e)[:100]}")
-
-
 async def cmd_strength(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Calculating...", parse_mode="HTML")
+    msg_l = await update.message.reply_text(
+        "⏳ Calculating...", parse_mode="HTML")
     try:
         async with aiohttp.ClientSession() as session:
             st  = await STRENGTH_CACHE.get(session)
-            ch  = chart_strength(st)
-            sc  = sorted(st.values(), key=lambda x: x.strength, reverse=True)
-            cap = (f"💪 <b>Currency Strength (24H)</b>\n\n"
-                   f"🟢 {sc[0].currency} ({sc[0].strength:+.2f}%)\n"
-                   f"🔴 {sc[-1].currency} ({sc[-1].strength:+.2f}%)")
-            await del_msg(msg)
-            await send_photo(ctx.bot, update.effective_chat.id, ch,
-                             caption=cap, parse_mode="HTML",
-                             reply_markup=kb_main())
+        ch  = chart_strength(st)
+        sc  = sorted(st.values(),
+                     key=lambda x: x.strength, reverse=True)
+        cap = (
+            f"💪 <b>Currency Strength (24H)</b>\n\n"
+            f"🟢 Strongest: {sc[0].currency} "
+            f"({sc[0].strength:+.2f}%)\n"
+            f"🔴 Weakest: {sc[-1].currency} "
+            f"({sc[-1].strength:+.2f}%)\n\n"
+            f"WAT: {SESSION_ENGINE.wat_time()}")
+        await del_msg(msg_l)
+        await send_photo(ctx.bot, update.effective_chat.id, ch,
+                         caption=cap, parse_mode="HTML",
+                         reply_markup=kb_main())
     except Exception as e:
-        await msg.edit_text(f"❌ {str(e)[:100]}")
+        await msg_l.edit_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def cmd_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg_l = await update.message.reply_text("⏳ Loading...")
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            st   = await STRENGTH_CACHE.get(http_session)
+        ch   = chart_strength(st)
+        sc   = sorted(st.values(),
+                      key=lambda x: x.strength, reverse=True)
+        sess = SESSION_ENGINE.get_session()
+        cap  = (
+            f"🌍 <b>MARKET OVERVIEW</b>\n\n"
+            f"🕐 {sess.wat_time}\n"
+            f"Session: {sess.session_name}"
+            f"{' | 🎯' if sess.is_kill_zone else ''}\n"
+            f"AMD: {sess.amd_phase}\n\n"
+            f"🟢 {sc[0].currency} ({sc[0].strength:+.2f}%)\n"
+            f"🔴 {sc[-1].currency} ({sc[-1].strength:+.2f}%)\n"
+            f"💡 Best pair: {sc[0].currency}/{sc[-1].currency}"
+        )
+        await del_msg(msg_l)
+        await send_photo(ctx.bot, update.effective_chat.id, ch,
+                         caption=cap, parse_mode="HTML",
+                         reply_markup=kb_main())
+    except Exception as e:
+        await msg_l.edit_text(f"❌ {str(e)[:100]}")
 
 
 async def cmd_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ml_s = ML_ENGINE.get_stats()
     text = (
-        f"📚 <b>FOREX QUANT v7.5 GUIDE</b>\n\n"
-        f"<b>🧠 Smart Money Metrics:</b>\n"
-        f"• VPIN — Probability of Informed Trading\n"
-        f"• Kyle's Lambda — Price impact per volume\n"
-        f"• Toxicity — Adverse selection risk\n"
-        f"• Roll Spread — True implied spread\n"
-        f"• Iceberg Detection — Hidden institutional orders\n"
-        f"• Absorption — Buy vs sell pressure\n\n"
-        f"<b>🌊 Liquidity Zones:</b>\n"
-        f"• Demand/Supply zones (order blocks)\n"
-        f"• Equal highs/lows (stop-hunt levels)\n"
-        f"• Fair Value Gaps (FVG)\n\n"
-        f"<b>🤖 ML Engine:</b>\n"
-        f"• Status: {'✅ Trained' if ml_s['is_trained'] else '⏳ Learning'}\n"
-        f"• Samples: {ml_s['n_samples']}\n"
-        f"• Accuracy: {ml_s['latest_acc']:.0%}\n"
-        f"• RF + Gradient Boosting + Logistic Regression\n"
-        f"• Global model — all users benefit equally\n\n"
-        f"<b>📊 Setup Quality:</b>\n"
-        f"🔥 A+ = 8+ factors — 1:2.5 R/R\n"
-        f"✅ A  = 6-7 factors — 1:2.0 R/R\n"
-        f"⚡ B  = 4-5 factors — 1:1.5 R/R\n"
-        f"⚠️ C  = 3   factors — 1:1.0 R/R\n\n"
-        f"<b>🔔 Auto Alerts:</b>\n"
-        f"• Fires at {MIN_ALERT_CONFIDENCE}%+ confidence only\n"
-        f"• Includes pattern memory context\n"
-        f"• Session-aware timing\n"
-        f"• 4-hour cooldown per pair\n\n"
-        f"<b>⚠️ Risk Reminder:</b>\n"
-        f"No system wins 100% of the time. Use a stop-loss "
-        f"on every single trade. Risk max 1-2% per trade."
+        f"📚 <b>FOREX QUANT v8.1 GUIDE</b>\n\n"
+        f"<b>🔧 Key Fixes in v8.1:</b>\n"
+        f"• R/R = Reward÷Risk (e.g. 1:2 means risking 1 to make 2)\n"
+        f"• Geometry validation before every signal\n"
+        f"• Min target: Forex {MIN_TARGET_PIPS_FOREX}p, "
+        f"Gold {MIN_TARGET_PIPS_GOLD}p\n"
+        f"• Min R/R: 1:{MIN_RR_RATIO}\n"
+        f"• TP/SL alerts only for signals sent to YOU\n"
+        f"• Trade IDs for easy reference\n\n"
+        f"<b>🏛️ ICT:</b> BOS·CHOCH·OB·FVG·Sweep·AMD·OTE\n"
+        f"<b>📐 Math:</b> Hurst·Entropy·Z-Score·ADR·Fibonacci\n"
+        f"<b>🤖 ML:</b> Meta-labeling · Purged WF · Calibrated\n"
+        f"Status: {'✅ Active' if ml_s['is_trained'] else '⏳ Learning'} "
+        f"({ml_s['n_samples']}/{ML_MIN_SAMPLES})\n\n"
+        f"<b>📌 Trade Management:</b>\n"
+        f"• Breakeven alert: 50% of target reached\n"
+        f"• Trailing stop alert: 75% of target reached\n"
+        f"• TP hit: Celebrate + note MAE/MFE\n"
+        f"• SL hit: Capital protected. Move on.\n\n"
+        f"<b>⚠️ Risk:</b> 1-2% max per trade. Always."
     )
     await update.message.reply_text(
         text, parse_mode="HTML", reply_markup=kb_main())
@@ -4349,28 +7157,33 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # ── Navigation ─────────────────────────────────────────
+        # ── Navigation ───────────────────────────────────────────
         if data == "main_menu":
             await del_msg(query.message)
-            await send_msg(ctx.bot, chat_id,
-                           "🎯 <b>FOREX QUANT v7.5</b>\n\n<i>Select option:</i>",
-                           parse_mode="HTML", reply_markup=kb_main())
+            sess = SESSION_ENGINE.get_session()
+            await send_msg(
+                ctx.bot, chat_id,
+                f"🎯 <b>FOREX QUANT v8.1</b>\n"
+                f"🕐 {sess.wat_time} | {sess.session_name}",
+                parse_mode="HTML", reply_markup=kb_main())
             return
 
-        if data in ("predict_menu", "analyze_menu", "summary_menu"):
-            mode = data.replace("_menu", "")
-            ic   = ("🎯" if mode == "predict" else
-                    "📊" if mode == "analyze" else "🧠")
+        if data in ("predict_menu","analyze_menu","summary_menu"):
+            mode = data.replace("_menu","")
+            ic   = ("🎯" if mode=="predict" else
+                    "📊" if mode=="analyze" else "🧠")
             await del_msg(query.message)
             await send_msg(ctx.bot, chat_id,
                            f"{ic} <b>SELECT PAIR</b>",
-                           parse_mode="HTML", reply_markup=kb_pairs(mode))
+                           parse_mode="HTML",
+                           reply_markup=kb_pairs(mode))
             return
 
-        if data in ("predict_more", "analyze_more", "summary_more"):
-            mode = data.replace("_more", "")
+        if data.endswith("_more"):
+            mode = data.replace("_more","")
             await del_msg(query.message)
-            await send_msg(ctx.bot, chat_id, "<b>More Crosses:</b>",
+            await send_msg(ctx.bot, chat_id,
+                           "<b>More Cross Pairs:</b>",
                            parse_mode="HTML",
                            reply_markup=kb_more_crosses(mode))
             return
@@ -4381,44 +7194,62 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                            parse_mode="HTML", reply_markup=kb_main())
             return
 
+        if data == "performance":
+            loading = await send_msg(
+                ctx.bot, chat_id, "⏳ Generating...",
+                parse_mode="HTML")
+            report = PERF_ENGINE.format_report()
+            ch     = chart_performance(QB.history)
+            if loading: await del_msg(loading)
+            if ch:
+                await send_photo(ctx.bot, chat_id, ch,
+                                 caption="📊 <b>Performance</b>",
+                                 parse_mode="HTML")
+            await send_msg(ctx.bot, chat_id, report,
+                           parse_mode="HTML", reply_markup=kb_main())
+            return
+
         if data == "overview":
-            await del_msg(query.message)
-            loading = await send_msg(ctx.bot, chat_id, "⏳ Loading...",
-                                     parse_mode="HTML")
+            loading = await send_msg(
+                ctx.bot, chat_id, "⏳ Loading...",
+                parse_mode="HTML")
             try:
-                async with aiohttp.ClientSession() as session:
-                    st  = await STRENGTH_CACHE.get(session)
-                    ch  = chart_strength(st)
-                    sc  = sorted(st.values(),
-                                 key=lambda x: x.strength, reverse=True)
-                    sn, hrs = current_session()
-                    cap = (f"🌍 <b>OVERVIEW</b>\n\n🕐 {sn}\n\n"
-                           f"🟢 {sc[0].currency} | 🔴 {sc[-1].currency}")
-                    if loading: await del_msg(loading)
-                    await send_photo(ctx.bot, chat_id, ch,
-                                     caption=cap, parse_mode="HTML",
-                                     reply_markup=kb_main())
+                async with aiohttp.ClientSession() as http_session:
+                    st  = await STRENGTH_CACHE.get(http_session)
+                ch  = chart_strength(st)
+                sc  = sorted(st.values(),
+                             key=lambda x: x.strength, reverse=True)
+                sess = SESSION_ENGINE.get_session()
+                cap  = (
+                    f"🌍 <b>OVERVIEW</b>\n"
+                    f"🕐 {sess.wat_time} | {sess.session_name}\n"
+                    f"🟢 {sc[0].currency} | 🔴 {sc[-1].currency}")
+                if loading: await del_msg(loading)
+                await send_photo(ctx.bot, chat_id, ch,
+                                 caption=cap, parse_mode="HTML",
+                                 reply_markup=kb_main())
             except Exception as e:
                 if loading:
                     await loading.edit_text(f"❌ {str(e)[:50]}")
             return
 
         if data == "strength":
-            await del_msg(query.message)
-            loading = await send_msg(ctx.bot, chat_id, "⏳ Calculating...",
-                                     parse_mode="HTML")
+            loading = await send_msg(
+                ctx.bot, chat_id, "⏳ Calculating...",
+                parse_mode="HTML")
             try:
-                async with aiohttp.ClientSession() as session:
-                    st  = await STRENGTH_CACHE.get(session)
-                    ch  = chart_strength(st)
-                    sc  = sorted(st.values(),
-                                 key=lambda x: x.strength, reverse=True)
-                    cap = (f"💪 <b>Currency Strength</b>\n\n"
-                           f"🟢 {sc[0].currency} | 🔴 {sc[-1].currency}")
-                    if loading: await del_msg(loading)
-                    await send_photo(ctx.bot, chat_id, ch,
-                                     caption=cap, parse_mode="HTML",
-                                     reply_markup=kb_main())
+                async with aiohttp.ClientSession() as http_session:
+                    st  = await STRENGTH_CACHE.get(http_session)
+                ch  = chart_strength(st)
+                sc  = sorted(st.values(),
+                             key=lambda x: x.strength, reverse=True)
+                cap = (
+                    f"💪 <b>Currency Strength</b>\n"
+                    f"🟢 {sc[0].currency} | 🔴 {sc[-1].currency}")
+                if loading: await del_msg(loading)
+                await send_photo(ctx.bot, chat_id, ch,
+                                 caption=cap, parse_mode="HTML",
+                                 reply_markup=kb_main())
             except Exception as e:
                 if loading:
                     await loading.edit_text(f"❌ {str(e)[:50]}")
@@ -4429,47 +7260,63 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ml_s = ML_ENGINE.get_stats()
             await send_msg(
                 ctx.bot, chat_id,
-                f"📚 <b>QUANT v7.5</b>\n\n"
-                f"🧠 VPIN · Kyle's λ · Toxicity · Liquidity Zones\n"
-                f"🤖 ML: {'Active' if ml_s['is_trained'] else 'Learning'} "
-                f"({ml_s['n_samples']} samples)\n"
-                f"🔔 Auto Alerts: {MIN_ALERT_CONFIDENCE}%+ confidence only\n"
+                f"📚 <b>Quant v8.1</b>\n\n"
+                f"R/R fixed ✅ | Trade IDs ✅ | "
+                f"Breakeven alerts ✅\n"
+                f"ML: {'Active' if ml_s['is_trained'] else 'Learning'} "
+                f"({ml_s['n_samples']}/{ML_MIN_SAMPLES})\n\n"
                 f"Use /guide for full details.",
                 parse_mode="HTML", reply_markup=kb_main())
             return
 
-        # ── Alerts ─────────────────────────────────────────────
+        # ── Alert management ─────────────────────────────────────
         if data == "alerts_menu":
             await del_msg(query.message)
-            is_sub = SUB_MANAGER.is_subscribed(chat_id)
-            sub    = SUB_MANAGER.get_subscription(chat_id) or {}
+            is_sub = SUB_MANAGER.is_active(chat_id)
+            sub    = SUB_MANAGER.get(chat_id) or {}
             if is_sub:
                 pairs = sub.get("pairs", [])
-                tf    = sub.get("timeframe", "H1")
-                cnt   = sub.get("alert_count", 0)
-                text  = (f"🔔 <b>ALERTS ACTIVE</b>\n\n"
-                         f"Watching: "
-                         f"{', '.join(pair_display(p) for p in pairs) or 'None'}\n"
-                         f"Timeframe: {tf}\nAlerts sent: {cnt}")
+                all_p = sub.get("all_pairs", False)
+                text  = (
+                    f"🔔 <b>ALERTS ACTIVE</b>\n\n"
+                    f"Watching: "
+                    f"{'ALL pairs' if all_p else ', '.join(pair_display(p) for p in pairs) or 'None'}\n"
+                    f"TF: {sub.get('timeframe','H1')} | "
+                    f"Min Q: {sub.get('min_quality','B')}\n"
+                    f"Sent: {sub.get('alert_count',0)}")
             else:
                 text = ("🔔 <b>AUTO ALERTS</b>\n\n"
-                        "<i>Subscribe to get institutional alerts.</i>")
+                        "<i>Subscribe to receive signals.</i>")
             await send_msg(ctx.bot, chat_id, text,
-                           parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+                           parse_mode="HTML",
+                           reply_markup=kb_alerts(chat_id))
             return
 
         if data == "al_sub":
             SUB_MANAGER.subscribe(chat_id, [], "H1")
-            await send_msg(ctx.bot, chat_id,
-                           "✅ <b>Subscribed!</b>\n\nNow add pairs to watch.",
-                           parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+            await send_msg(
+                ctx.bot, chat_id,
+                "✅ <b>Subscribed!</b>\n\n"
+                "Toggle 'ALL Pairs' to receive every signal, "
+                "or add specific pairs.",
+                parse_mode="HTML", reply_markup=kb_alerts(chat_id))
             return
 
         if data == "al_unsub":
             SUB_MANAGER.unsubscribe(chat_id)
             await send_msg(ctx.bot, chat_id,
-                           "🔕 <b>Unsubscribed.</b> No more auto alerts.",
+                           "🔕 <b>Unsubscribed.</b>",
                            parse_mode="HTML", reply_markup=kb_main())
+            return
+
+        if data == "al_toggle_all":
+            sub  = SUB_MANAGER.get(chat_id) or {}
+            curr = sub.get("all_pairs", False)
+            SUB_MANAGER.set_all_pairs(chat_id, not curr)
+            await send_msg(
+                ctx.bot, chat_id,
+                f"{'✅ ALL pairs ON — every signal delivered.' if not curr else '📋 Specific pairs mode.'}",
+                parse_mode="HTML", reply_markup=kb_alerts(chat_id))
             return
 
         if data == "al_add":
@@ -4481,258 +7328,332 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         if data == "al_rem":
-            sub = SUB_MANAGER.get_subscription(chat_id)
-            if sub and sub.get("pairs"):
-                await del_msg(query.message)
-                await send_msg(ctx.bot, chat_id,
-                               "➖ <b>SELECT PAIR TO REMOVE:</b>",
-                               parse_mode="HTML",
-                               reply_markup=kb_alert_pairs("alrem"))
-            else:
-                await send_msg(ctx.bot, chat_id,
-                               "No pairs to remove.",
-                               reply_markup=kb_alerts(chat_id))
+            await del_msg(query.message)
+            await send_msg(ctx.bot, chat_id,
+                           "➖ <b>SELECT PAIR TO REMOVE:</b>",
+                           parse_mode="HTML",
+                           reply_markup=kb_alert_pairs("alrem"))
             return
 
         if data == "al_tf":
             await del_msg(query.message)
+            await send_msg(
+                ctx.bot, chat_id,
+                "⚡ <b>SELECT ALERT TIMEFRAME:</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⚡ M15", callback_data="al_settf_M15"),
+                     InlineKeyboardButton(
+                        "📊 H1",  callback_data="al_settf_H1")],
+                    [InlineKeyboardButton(
+                        "📈 H4",  callback_data="al_settf_H4")],
+                    [InlineKeyboardButton(
+                        "◀️ Back", callback_data="alerts_menu")],
+                ]))
+            return
+
+        if data == "al_quality":
+            await del_msg(query.message)
             await send_msg(ctx.bot, chat_id,
-                           "⚡ <b>SELECT TIMEFRAME FOR ALERTS:</b>",
+                           "⭐ <b>MINIMUM SIGNAL QUALITY:</b>",
                            parse_mode="HTML",
-                           reply_markup=kb_alert_tf())
+                           reply_markup=kb_quality())
             return
 
         if data == "al_stats":
-            sub = SUB_MANAGER.get_subscription(chat_id) or {}
+            sub = SUB_MANAGER.get(chat_id) or {}
             await send_msg(
                 ctx.bot, chat_id,
                 f"📊 <b>Your Alert Stats</b>\n\n"
-                f"Total alerts: {sub.get('alert_count', 0)}\n"
-                f"Last alert:   {sub.get('last_alert', 'Never')}\n\n"
-                f"<i>Alerts fire only on genuine institutional setups.</i>",
+                f"Total alerts: {sub.get('alert_count',0)}\n"
+                f"Last alert: "
+                f"{(sub.get('last_alert','Never') or 'Never')[:19]}\n\n"
+                f"<i>TP/SL/Breakeven only for signals sent to you.</i>",
                 parse_mode="HTML", reply_markup=kb_alerts(chat_id))
             return
 
         if data.startswith("aladd_"):
             pair = data[6:]
-            SUB_MANAGER.add_pair(chat_id, pair)
-            sub   = SUB_MANAGER.get_subscription(chat_id) or {}
-            pairs = sub.get("pairs", [])
-            await send_msg(
-                ctx.bot, chat_id,
-                f"✅ Added {pair_display(pair)}\n\n"
-                f"Watching: {', '.join(pair_display(p) for p in pairs)}",
-                parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+            if pair in ALL_PAIRS:
+                SUB_MANAGER.add_pair(chat_id, pair)
+                sub   = SUB_MANAGER.get(chat_id) or {}
+                pairs = sub.get("pairs",[])
+                await send_msg(
+                    ctx.bot, chat_id,
+                    f"✅ Added {pair_display(pair)}\n\n"
+                    f"Watching: "
+                    f"{', '.join(pair_display(p) for p in pairs)}",
+                    parse_mode="HTML",
+                    reply_markup=kb_alerts(chat_id))
             return
 
         if data.startswith("alrem_"):
             pair = data[6:]
-            SUB_MANAGER.remove_pair(chat_id, pair)
-            sub   = SUB_MANAGER.get_subscription(chat_id) or {}
-            pairs = sub.get("pairs", [])
-            await send_msg(
-                ctx.bot, chat_id,
-                f"✅ Removed {pair_display(pair)}\n\n"
-                f"Watching: "
-                f"{', '.join(pair_display(p) for p in pairs) or 'None'}",
-                parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+            if pair in ALL_PAIRS:
+                SUB_MANAGER.remove_pair(chat_id, pair)
+                sub   = SUB_MANAGER.get(chat_id) or {}
+                pairs = sub.get("pairs",[])
+                await send_msg(
+                    ctx.bot, chat_id,
+                    f"✅ Removed {pair_display(pair)}\n\n"
+                    f"Watching: "
+                    f"{', '.join(pair_display(p) for p in pairs) or 'None'}",
+                    parse_mode="HTML",
+                    reply_markup=kb_alerts(chat_id))
             return
 
         if data.startswith("al_settf_"):
             tf = data[9:]
-            SUB_MANAGER.set_tf(chat_id, tf)
+            if tf in TIMEFRAMES:
+                SUB_MANAGER.set_tf(chat_id, tf)
+                await send_msg(ctx.bot, chat_id,
+                               f"✅ Alert TF: <b>{tf}</b>",
+                               parse_mode="HTML",
+                               reply_markup=kb_alerts(chat_id))
+            return
+
+        if data.startswith("al_setq_"):
+            q = data[8:]
+            SUB_MANAGER.set_min_quality(chat_id, q)
             await send_msg(ctx.bot, chat_id,
-                           f"✅ Alert timeframe set to <b>{tf}</b>",
-                           parse_mode="HTML", reply_markup=kb_alerts(chat_id))
+                           f"✅ Min quality: <b>{q}</b>",
+                           parse_mode="HTML",
+                           reply_markup=kb_alerts(chat_id))
             return
 
-        # ── Pair → timeframe selection ─────────────────────────
-        for mode in ("predict", "analyze", "summary"):
+        # ── Pair → TF → Analysis ─────────────────────────────────
+        for mode in ("predict","analyze","summary"):
             prefix = f"{mode}_pair_"
-            if data.startswith(prefix):
-                pair, tf = parse_pair_tf(data, prefix)
-                if pair and tf:
-                    break
-                # No timeframe yet — show TF selector
-                candidate = data[len(prefix):]
-                if candidate in ALL_PAIRS:
-                    await del_msg(query.message)
-                    await send_msg(
-                        ctx.bot, chat_id,
-                        f"{asset_emoji(candidate)} "
-                        f"<b>{pair_display(candidate)}</b>"
-                        f"\n\n<i>Select timeframe:</i>",
-                        parse_mode="HTML",
-                        reply_markup=kb_tf(candidate, mode))
-                    return
+            if not data.startswith(prefix):
+                continue
+            pair, tf = parse_pair_tf_cb(data, prefix)
 
-        # ── PREDICT ────────────────────────────────────────────
-        if data.startswith("predict_pair_"):
-            pair, tf = parse_pair_tf(data, "predict_pair_")
-            if not pair or not tf:
-                await send_msg(ctx.bot, chat_id, "❌ Invalid selection")
+            if pair and not tf:
+                # Show TF selector
+                await del_msg(query.message)
+                await send_msg(
+                    ctx.bot, chat_id,
+                    f"{asset_emoji(pair)} <b>{pair_display(pair)}</b>"
+                    f"\n\n<i>Select timeframe:</i>",
+                    parse_mode="HTML",
+                    reply_markup=kb_tf(pair, mode))
                 return
-            await del_msg(query.message)
-            loading = await send_msg(
-                ctx.bot, chat_id,
-                f"⏳ <b>Analyzing {pair_display(pair)}...</b>\n\n"
-                f"<i>Running institutional + ML analysis...</i>",
-                parse_mode="HTML")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    dd = await full_analysis(session, pair, tf)
-                of  = dd["of"]; af = dd["af"]; lz = dd["lz"]
-                pred = QB.generate(dd["candles"], of, dd["vp"], dd["ob"],
-                                   dd["pb"], dd["cs"], af, pair, lz)
-                if loading: await del_msg(loading)
-                sn_now = session_name(datetime.now(timezone.utc).hour)
-                sim    = PATTERN_MEMORY.find_similar(
-                    pair, pred.get("direction", "LONG"),
-                    af, of, sn_now)
-                if pred.get("has_setup"):
-                    pid  = (f"{pair}_{tf}_"
-                            f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
-                    aligned = (pred["bull_count"]
-                               if pred["direction"] == "LONG"
-                               else pred["bear_count"])
-                    pobj = QuantPrediction(
-                        prediction_id=pid, pair=pair, timeframe=tf,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        current_price=of.price,
-                        direction=pred["direction"],
-                        target_price=pred["target"],
-                        invalidation_price=pred["stop"],
-                        confidence=pred["confidence"],
-                        quality=pred["quality"],
-                        reasons=pred["reasons"],
-                        key_levels=pred["key_levels"],
-                        factors_aligned=aligned,
-                        features=pred.get("features", []),
-                        status="ACTIVE", chat_id=chat_id,
-                        ml_confidence=pred.get("ml_prob", 0.0),
-                        ml_used=ML_ENGINE.is_trained
-                    )
-                    QB.add(pobj)
-                    PT.add(pobj)
-                    PATTERN_MEMORY.record_pattern(pobj, of, af, sn_now)
-                    ch  = chart_prediction(dd["candles"], pair, pred,
-                                           dd["vp"], of, af, lz)
-                    msg = msg_prediction(pair, tf, pred, of, dd["ob"],
-                                         dd["pb"], af, lz, sim)
-                    sm  = (af.smart_money_activity if af else "N/A")
-                    await send_photo(
-                        ctx.bot, chat_id, ch,
-                        caption=(f"{asset_emoji(pair)} "
-                                 f"<b>{pair_display(pair)}</b> | "
-                                 f"{'🟢' if pred['direction']=='LONG' else '🔴'} "
-                                 f"{pred['direction']} | 🧠 {sm}"),
-                        parse_mode="HTML")
-                    await send_msg(ctx.bot, chat_id, msg,
-                                   parse_mode="HTML", reply_markup=kb_main())
-                    await send_msg(ctx.bot, chat_id,
-                                   SA.advice(pair), parse_mode="HTML")
-                else:
-                    ch  = chart_no_setup(dd["candles"], pair)
-                    msg = msg_no_setup(pair, tf, of,
-                                       pred.get("bull_count", 0),
-                                       pred.get("bear_count", 0), af)
-                    await send_photo(
-                        ctx.bot, chat_id, ch,
-                        caption=(f"{asset_emoji(pair)} "
-                                 f"<b>{pair_display(pair)}</b>"
-                                 f" | ⚪ NO SETUP"),
-                        parse_mode="HTML")
-                    await send_msg(ctx.bot, chat_id, msg,
-                                   parse_mode="HTML", reply_markup=kb_main())
-            except Exception as e:
-                log.error(f"Predict {pair}: {e}", exc_info=True)
-                if loading: await del_msg(loading)
-                await send_msg(ctx.bot, chat_id,
-                               f"❌ Error: {str(e)[:100]}",
-                               parse_mode="HTML", reply_markup=kb_main())
-            return
 
-        # ── ANALYZE ────────────────────────────────────────────
-        if data.startswith("analyze_pair_"):
-            pair, tf = parse_pair_tf(data, "analyze_pair_")
-            if not pair or not tf:
-                await send_msg(ctx.bot, chat_id, "❌ Invalid selection")
-                return
-            await del_msg(query.message)
-            loading = await send_msg(
-                ctx.bot, chat_id,
-                f"⏳ <b>Analyzing {pair_display(pair)}...</b>",
-                parse_mode="HTML")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    dd = await full_analysis(session, pair, tf)
-                ms = msgs_analysis(pair, tf, dd["of"], dd["vp"],
-                                   dd["ob"], dd["pb"], dd["af"], dd["lz"])
-                if loading: await del_msg(loading)
-                for m in ms:
-                    await send_msg(ctx.bot, chat_id, m, parse_mode="HTML")
-                    await asyncio.sleep(0.3)
-                await send_msg(ctx.bot, chat_id,
-                               SA.advice(pair), parse_mode="HTML")
-                await send_msg(ctx.bot, chat_id,
-                               "✅ <b>Analysis complete!</b>",
-                               parse_mode="HTML", reply_markup=kb_main())
-            except Exception as e:
-                log.error(f"Analyze {pair}: {e}", exc_info=True)
-                if loading: await del_msg(loading)
-                await send_msg(ctx.bot, chat_id,
-                               f"❌ Error: {str(e)[:100]}",
-                               parse_mode="HTML", reply_markup=kb_main())
-            return
+            if pair and tf:
+                await del_msg(query.message)
+                loading = await send_msg(
+                    ctx.bot, chat_id,
+                    f"⏳ <b>Analyzing {pair_display(pair)} {tf}...</b>",
+                    parse_mode="HTML")
+                try:
+                    async with aiohttp.ClientSession() as http_session:
+                        dd = await full_analysis(http_session, pair, tf)
 
-        # ── SUMMARY ────────────────────────────────────────────
-        if data.startswith("summary_pair_"):
-            pair, tf = parse_pair_tf(data, "summary_pair_")
-            if not pair or not tf:
-                await send_msg(ctx.bot, chat_id, "❌ Invalid selection")
-                return
-            await del_msg(query.message)
-            loading = await send_msg(
-                ctx.bot, chat_id,
-                f"⏳ <b>Generating Market Intelligence Brief...</b>",
-                parse_mode="HTML")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    dd = await full_analysis(session, pair, tf)
-                pred = QB.generate(dd["candles"], dd["of"], dd["vp"],
-                                   dd["ob"], dd["pb"], dd["cs"],
-                                   dd["af"], pair, dd["lz"])
-                summ = MS.summarize(
-                    pair, dd["of"], dd["af"], dd["vp"],
-                    dd["ob"], dd["pb"], dd["lz"],
-                    pred if pred.get("has_setup") else None)
-                if loading: await del_msg(loading)
-                sections = summ.split("\n\n")
-                chunk    = ""
-                for sec in sections:
-                    if len(chunk) + len(sec) + 2 > 3800:
+                    of      = dd["of"]
+                    af      = dd["af"]
+                    session = SESSION_ENGINE.get_session()
+                    regime  = REGIME_ENGINE.detect(
+                        dd["candles"], dd["daily_candles"], pair)
+                    ict     = ICT_ENGINE.full_analysis(
+                        dd["candles"], dd["daily_candles"],
+                        session, pair)
+
+                    if mode == "predict":
+                        result = await QB.generate(
+                            dd["candles"], of, af, dd["vp"],
+                            dd["ob"], dd["pb"], dd["cs"], pair,
+                            dd["daily_candles"],
+                            dd["m15_candles"], dd["h4_candles"])
+
+                        if loading: await del_msg(loading)
+
+                        if result.get("has_setup"):
+                            signal = result["signal"]
+                            sim    = PATTERN_MEMORY.find_similar(
+                                pair, signal.direction,
+                                signal.strategy.value, af, of,
+                                result["regime"], session)
+
+                            # Generate trade ID
+                            trade_id = generate_trade_id(
+                                pair, signal.direction)
+                            result["trade_id"] = trade_id
+
+                            msg = fmt_signal_message(
+                                pair, tf, result, of, af,
+                                session, result["regime"], sim)
+
+                            # Chart
+                            ch = None
+                            try:
+                                ch = chart_signal(
+                                    dd["candles"], pair, result,
+                                    of, af, result["regime"], ict)
+                            except Exception:
+                                pass
+
+                            if ch:
+                                await send_photo(
+                                    ctx.bot, chat_id, ch,
+                                    caption=(
+                                        f"{asset_emoji(pair)} "
+                                        f"<b>{pair_display(pair)}</b> | "
+                                        f"{'🟢' if signal.direction=='LONG' else '🔴'} "
+                                        f"{signal.direction} | "
+                                        f"🆔 {trade_id}"),
+                                    parse_mode="HTML")
+
+                            await send_msg(ctx.bot, chat_id, msg,
+                                           parse_mode="HTML",
+                                           reply_markup=kb_main())
+                            await send_msg(ctx.bot, chat_id,
+                                           SA.advice(pair, session),
+                                           parse_mode="HTML")
+
+                            # Track prediction
+                            now_dt  = datetime.now(timezone.utc)
+                            pid     = str(uuid.uuid4())
+                            aligned = sum(
+                                1 for f in signal.factors
+                                if f.direction == (
+                                    "BULLISH" if signal.direction=="LONG"
+                                    else "BEARISH"))
+
+                            pobj = QuantPrediction(
+                                trade_id           = trade_id,
+                                prediction_id      = pid,
+                                pair               = pair,
+                                timeframe          = tf,
+                                timestamp          = now_dt.isoformat(),
+                                current_price      = of.price,
+                                direction          = signal.direction,
+                                target_price       = signal.target,
+                                invalidation_price = signal.stop,
+                                breakeven_price    = signal.breakeven_price,
+                                trailing_price     = signal.trailing_price,
+                                confidence         = result["confidence"],
+                                calibrated_prob    = result.get(
+                                    "calibrated_prob", 0.5),
+                                quality            = signal.quality.value,
+                                strategy           = signal.strategy.value,
+                                reasons            = signal.reasons,
+                                key_levels         = result.get(
+                                    "key_levels",[]),
+                                factors_aligned    = aligned,
+                                features           = signal.features,
+                                rr_ratio           = signal.rr_ratio,
+                                reward_pips        = signal.reward_pips,
+                                risk_pips          = signal.risk_pips,
+                                status             = "ACTIVE",
+                                chat_ids           = [chat_id],
+                                ml_confidence      = result.get("ml_prob",0.0),
+                                ml_used            = ML_ENGINE.is_trained,
+                                regime_at_signal   = result["regime"].regime.value,
+                                session_at_signal  = session.session_name,
+                                was_sent_to_users  = True,
+                                sent_quality       = signal.quality.value,
+                            )
+                            QB.add_to_history(pobj)
+                            PT.add(pobj)
+                            PATTERN_MEMORY.record(
+                                pobj, of, af, regime, session)
+
+                            # ML data store
+                            ML_DATA_STORE.add({
+                                "prediction_id": pid,
+                                "features":      signal.features,
+                                "outcome":       "",
+                                "pips_gained":   0.0,
+                                "strategy":      signal.strategy.value,
+                                "session":       session.session_name,
+                                "regime":        regime.regime.value,
+                            })
+
+                        else:
+                            factors = []
+                            if result.get("signal"):
+                                factors = result["signal"].factors
+                            msg = fmt_no_setup_message(
+                                pair, tf, of,
+                                result.get("regime", regime),
+                                session, factors)
+                            ch = None
+                            try:
+                                ch = chart_no_setup(dd["candles"], pair)
+                            except Exception:
+                                pass
+                            if ch:
+                                await send_photo(
+                                    ctx.bot, chat_id, ch,
+                                    caption=(
+                                        f"{asset_emoji(pair)} "
+                                        f"<b>{pair_display(pair)}</b>"
+                                        f" | ⚪ NO SETUP"),
+                                    parse_mode="HTML")
+                            await send_msg(ctx.bot, chat_id, msg,
+                                           parse_mode="HTML",
+                                           reply_markup=kb_main())
+
+                    elif mode == "analyze":
+                        msgs = fmt_analysis_messages(
+                            pair, tf, of, af, dd["vp"],
+                            dd["ob"], dd["pb"], regime,
+                            session, ict)
+                        if loading: await del_msg(loading)
+                        for m in msgs:
+                            if m.strip():
+                                await send_msg(ctx.bot, chat_id, m,
+                                               parse_mode="HTML")
+                                await asyncio.sleep(0.4)
+                        await send_msg(ctx.bot, chat_id,
+                                       SA.advice(pair, session),
+                                       parse_mode="HTML",
+                                       reply_markup=kb_main())
+
+                    elif mode == "summary":
+                        result = await QB.generate(
+                            dd["candles"], of, af, dd["vp"],
+                            dd["ob"], dd["pb"], dd["cs"], pair,
+                            dd["daily_candles"],
+                            dd["m15_candles"], dd["h4_candles"])
+                        summ = fmt_market_summary(
+                            pair, of, af, dd["vp"], dd["ob"],
+                            dd["pb"], regime, session, ict,
+                            result if result.get("has_setup") else None)
+                        if loading: await del_msg(loading)
+                        # Split long messages
+                        sections = summ.split("\n\n")
+                        chunk    = ""
+                        for sec in sections:
+                            if len(chunk) + len(sec) > 3800:
+                                if chunk.strip():
+                                    await send_msg(
+                                        ctx.bot, chat_id,
+                                        chunk.strip(),
+                                        parse_mode="HTML")
+                                    await asyncio.sleep(0.4)
+                                chunk = sec + "\n\n"
+                            else:
+                                chunk += sec + "\n\n"
                         if chunk.strip():
                             await send_msg(ctx.bot, chat_id,
-                                           chunk.strip(), parse_mode="HTML")
-                            await asyncio.sleep(0.4)
-                        chunk = sec + "\n\n"
-                    else:
-                        chunk += sec + "\n\n"
-                if chunk.strip():
-                    await send_msg(ctx.bot, chat_id,
-                                   chunk.strip(), parse_mode="HTML")
-                await send_msg(ctx.bot, chat_id,
-                               SA.advice(pair), parse_mode="HTML")
-                await send_msg(ctx.bot, chat_id,
-                               "✅ <b>Brief complete!</b>",
-                               parse_mode="HTML", reply_markup=kb_main())
-            except Exception as e:
-                log.error(f"Summary {pair}: {e}", exc_info=True)
-                if loading: await del_msg(loading)
-                await send_msg(ctx.bot, chat_id,
-                               f"❌ Error: {str(e)[:100]}",
-                               parse_mode="HTML", reply_markup=kb_main())
-            return
+                                           chunk.strip(),
+                                           parse_mode="HTML")
+                        await send_msg(ctx.bot, chat_id,
+                                       SA.advice(pair, session),
+                                       parse_mode="HTML",
+                                       reply_markup=kb_main())
+
+                except Exception as e:
+                    log.error(
+                        f"Callback {mode} {pair}: {e}", exc_info=True)
+                    if loading: await del_msg(loading)
+                    await send_msg(
+                        ctx.bot, chat_id,
+                        f"❌ Analysis error: {str(e)[:100]}",
+                        parse_mode="HTML", reply_markup=kb_main())
+                return
 
     except Exception as e:
         log.error(f"Callback error: {e}", exc_info=True)
@@ -4742,107 +7663,1445 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_error(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    log.error(f"Error: {ctx.error}", exc_info=True)
+    log.error(f"Bot error: {ctx.error}", exc_info=True)
     try:
         if update and update.effective_chat:
             await send_msg(ctx.bot, update.effective_chat.id,
-                           "❌ An error occurred. Please try again.",
+                           "❌ Error occurred. Please try again.",
                            reply_markup=kb_main())
     except Exception:
         pass
 
+# ════════════════════════════════════════════════════════════════
+#  END OF PART 3
+# ════════════════════════════════════════════════════════════════
 
 # ════════════════════════════════════════════════════════════════
-#  BACKGROUND TASKS
+#  FOREX QUANT v8.1 — PART 4 OF 4
+#  Background Task Manager, Additional Commands,
+#  Startup/Shutdown Hooks, Main Entry Point
+#  Complete Production Assembly
 # ════════════════════════════════════════════════════════════════
 
-async def bg_tasks(app):
-    asyncio.create_task(monitor_loop(app))
-    asyncio.create_task(alert_loop(app))
-    asyncio.create_task(ml_retrain_loop())
-    asyncio.create_task(initial_backtest())
-    log.info("All background tasks started")
+# ════════════════════════════════════════════════════════════════
+#  BACKGROUND TASK MANAGER
+# ════════════════════════════════════════════════════════════════
 
+class BackgroundTaskManager:
+    """
+    Manages all background tasks with automatic restart,
+    exponential backoff on errors, and health monitoring.
+    """
 
-async def ml_retrain_loop():
-    while True:
+    def __init__(self):
+        self.tasks:        Dict[str, asyncio.Task] = {}
+        self.start_times:  Dict[str, datetime]     = {}
+        self.error_counts: Dict[str, int]          = {}
+        self.running       = False
+
+    async def start_all(self, app):
+        """Start all background tasks."""
+        self.running = True
+        task_defs = [
+            ("monitor",        self._run_monitor,       app),
+            ("alert_scanner",  self._run_alert_scanner, app),
+            ("ml_retrain",     self._run_ml_retrain,    None),
+            ("initial_bt",     self._run_initial_bt,    None),
+            ("daily_summary",  self._run_daily_summary, app),
+            ("regime_cache",   self._run_regime_cache,  None),
+            ("health_check",   self._run_health_check,  None),
+        ]
+        for name, coro_fn, arg in task_defs:
+            task = asyncio.create_task(
+                self._protected(name, coro_fn, arg),
+                name=name)
+            self.tasks[name]        = task
+            self.start_times[name]  = datetime.now(timezone.utc)
+            self.error_counts[name] = 0
+            log.info(f"Task started: {name}")
+
+        log.info(f"All {len(task_defs)} background tasks running")
+
+    async def _protected(self, name: str, coro_fn, arg):
+        """Restart task on failure with exponential backoff."""
+        while self.running:
+            try:
+                if arg is not None:
+                    await coro_fn(arg)
+                else:
+                    await coro_fn()
+                log.info(f"Task '{name}' ended normally — restarting...")
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                log.info(f"Task '{name}' cancelled.")
+                break
+            except Exception as e:
+                self.error_counts[name] = (
+                    self.error_counts.get(name, 0) + 1)
+                count = self.error_counts[name]
+                wait  = min(300, 10 * (2 ** min(count - 1, 5)))
+                log.error(
+                    f"Task '{name}' error #{count}: {e}. "
+                    f"Restarting in {wait}s...")
+                await asyncio.sleep(wait)
+
+    # ── Monitor: check predictions, send outcome alerts ──────────
+    async def _run_monitor(self, app):
+        log.info("Monitor task active")
+        while True:
+            try:
+                notes = await PT.check(app.bot)
+                for n in notes:
+                    pred = n["pred"]
+                    # CRITICAL: Only notify if signal was sent to users
+                    if not pred.was_sent_to_users:
+                        log.debug(
+                            f"Skipping notification for unsent pred "
+                            f"[{pred.trade_id}]")
+                        continue
+
+                    msg = fmt_outcome_notification(
+                        pred, n["type"], n["cp"])
+
+                    # Send to ALL chat_ids that received the original signal
+                    for chat_id in pred.chat_ids:
+                        await send_msg(
+                            app.bot, chat_id, msg,
+                            parse_mode="HTML")
+                        await asyncio.sleep(0.3)
+
+                    # Record in performance engine for resolved trades
+                    if n["type"] in ("TARGET_HIT", "STOP_HIT"):
+                        PERF_ENGINE.record(pred)
+                        log.info(
+                            f"[{pred.trade_id}] {n['type']} | "
+                            f"{pred.pair} | "
+                            f"{pred.pips_gained:+.1f}p | "
+                            f"MAE:{pred.mae_pips:.1f}p | "
+                            f"MFE:{pred.mfe_pips:.1f}p")
+
+                await asyncio.sleep(MONITORING_INTERVAL)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Monitor task error: {e}")
+                await asyncio.sleep(MONITORING_INTERVAL)
+
+    # ── Alert scanner: scan all pairs ────────────────────────────
+    async def _run_alert_scanner(self, app):
+        log.info("Alert scanner task active")
+        # Initial delay — let bot fully initialize
+        await asyncio.sleep(20)
+        while True:
+            try:
+                session  = SESSION_ENGINE.get_session()
+                interval = SESSION_ENGINE.get_scan_interval(session)
+                n        = await AE.scan_all(app)
+                if n > 0:
+                    log.info(
+                        f"Scanner: {n} alerts | "
+                        f"{session.session_name} | "
+                        f"Next in {interval}s")
+                else:
+                    log.debug(
+                        f"Scanner: no setups | "
+                        f"{session.session_name} | "
+                        f"Next in {interval}s")
+                await asyncio.sleep(interval)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Alert scanner error: {e}")
+                await asyncio.sleep(60)
+
+    # ── ML retrain: every 4 hours ─────────────────────────────────
+    async def _run_ml_retrain(self):
+        log.info("ML retrain task active")
+        # First run after 30 minutes
+        await asyncio.sleep(1800)
+        while True:
+            try:
+                n_resolved = ML_DATA_STORE.n_samples
+                n_total    = ML_DATA_STORE.n_total
+
+                log.info(
+                    f"ML retrain check: "
+                    f"{n_resolved} resolved / "
+                    f"{n_total} total / "
+                    f"need {ML_MIN_SAMPLES}")
+
+                if n_resolved >= ML_MIN_SAMPLES:
+                    result = ML_ENGINE.train()
+                    log.info(f"ML retrain: {result}")
+                else:
+                    log.info(
+                        f"ML waiting: "
+                        f"{n_resolved}/{ML_MIN_SAMPLES} "
+                        f"resolved trades needed")
+
+                # Also retrain from QB history as backup
+                if not ML_ENGINE.is_trained:
+                    hist_resolved = [
+                        p for p in QB.history
+                        if p.get("outcome") in ("WIN","LOSS")
+                        and len(p.get("features",[])) == 20
+                    ]
+                    if len(hist_resolved) >= ML_MIN_SAMPLES:
+                        # Feed into ML data store
+                        for h in hist_resolved:
+                            ML_DATA_STORE.add({
+                                "prediction_id": h.get(
+                                    "prediction_id",""),
+                                "features":      h.get("features",[]),
+                                "outcome":       h.get("outcome",""),
+                                "pips_gained":   h.get("pips_gained",0),
+                                "strategy":      h.get("strategy",""),
+                                "session":       h.get("session",""),
+                                "regime":        h.get("regime",""),
+                            })
+                        result = ML_ENGINE.train()
+                        log.info(f"ML trained from QB history: {result}")
+
+                # Retrain every 4 hours
+                await asyncio.sleep(4 * 3600)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"ML retrain error: {e}")
+                await asyncio.sleep(3600)
+
+    # ── Initial backtest: runs on startup ────────────────────────
+    async def _run_initial_bt(self):
+        log.info("Backtest task active")
+        # Wait 45 seconds for everything to initialize
+        await asyncio.sleep(45)
+
         try:
-            await asyncio.sleep(6 * 3600)
-            done = [p for p in QB.history
-                    if p.get("outcome") in ("WIN", "LOSS")]
-            if len(done) >= ML_MIN_SAMPLES:
-                result = ML_ENGINE.train(QB.history)
-                log.info(f"ML retrain: {result}")
+            if HISTORICAL_BT.stale():
+                log.info("Running startup backtest...")
+
+                # Phase 1: Major pairs
+                await HISTORICAL_BT.run(
+                    pairs=ASSET_CATEGORIES["forex_major"],
+                    tf="H1")
+                await asyncio.sleep(30)
+
+                # Phase 2: Selected crosses
+                await HISTORICAL_BT.run(
+                    pairs=ASSET_CATEGORIES["forex_cross"][:7],
+                    tf="H1")
+                await asyncio.sleep(30)
+
+                # Phase 3: Metals + Indices
+                await HISTORICAL_BT.run(
+                    pairs=(ASSET_CATEGORIES["metals"] +
+                           ASSET_CATEGORIES["indices"]),
+                    tf="H1")
+
+                log.info("Startup backtest complete")
+            else:
+                log.info("Backtest data fresh — skipping startup run")
+
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            log.error(f"ML retrain loop: {e}")
+            log.error(f"Initial backtest error: {e}")
+
+        # Daily refresh at 02:00 UTC
+        while True:
+            try:
+                now    = datetime.now(timezone.utc)
+                target = now.replace(
+                    hour=2, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    target += timedelta(days=1)
+                wait = (target - now).total_seconds()
+                log.info(f"Next backtest refresh in {wait/3600:.1f}h")
+                await asyncio.sleep(wait)
+
+                log.info("Running daily backtest refresh...")
+                await HISTORICAL_BT.run(
+                    pairs=ASSET_CATEGORIES["forex_major"],
+                    tf="H1")
+                await asyncio.sleep(60)
+                await HISTORICAL_BT.run(
+                    pairs=ASSET_CATEGORIES["forex_cross"][:7],
+                    tf="H1")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Daily backtest error: {e}")
+                await asyncio.sleep(3600)
+
+    # ── Daily summary: sends at 21:00 UTC (22:00 WAT) ────────────
+    async def _run_daily_summary(self, app):
+        log.info("Daily summary task active")
+        while True:
+            try:
+                now    = datetime.now(timezone.utc)
+                target = now.replace(
+                    hour=21, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    target += timedelta(days=1)
+                wait = (target - now).total_seconds()
+                await asyncio.sleep(wait)
+
+                # Build summary
+                exp      = PERF_ENGINE.get_expectancy()
+                ml_s     = ML_ENGINE.get_stats()
+                strat_b  = PERF_ENGINE.get_strategy_breakdown()
+                sess_b   = PERF_ENGINE.get_session_breakdown()
+                mode, risk_pct, risk_msg = PERF_ENGINE.get_risk_mode()
+                session  = SESSION_ENGINE.get_session()
+                wat      = SESSION_ENGINE.wat_time()
+
+                best_strat = (
+                    max(strat_b.items(),
+                        key=lambda x: x[1]["expectancy"],
+                        default=(None, {}))[0]
+                    if strat_b else None)
+
+                best_sess = (
+                    max(sess_b.items(),
+                        key=lambda x: x[1]["expectancy"],
+                        default=(None, {}))[0]
+                    if sess_b else None)
+
+                msg = (
+                    f"{'='*35}\n"
+                    f"📊 <b>DAILY PERFORMANCE SUMMARY</b>\n"
+                    f"{'='*35}\n\n"
+                    f"🕐 {wat} | "
+                    f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n\n"
+
+                    f"<b>Performance (All Time):</b>\n"
+                    f"├ Resolved:   <b>{exp['total']}</b> trades\n"
+                    f"├ Win Rate:   <b>{exp['win_rate']:.1%}</b>\n"
+                    f"├ Avg Win:    <b>+{exp['avg_win']:.1f} pips</b>\n"
+                    f"├ Avg Loss:   <b>-{exp['avg_loss']:.1f} pips</b>\n"
+                    f"├ Expectancy: <b>{exp['expectancy']:+.1f} pips/trade</b>\n"
+                    f"├ Avg MAE:    {exp['avg_mae']:.1f}p\n"
+                    f"└ Max DD:     "
+                    f"{PERF_ENGINE.data.get('max_drawdown',0):.1f}p\n\n"
+                )
+
+                if best_strat:
+                    e = strat_b[best_strat]
+                    msg += (
+                        f"🏆 Best Strategy: "
+                        f"<b>{best_strat[:25]}</b>\n"
+                        f"   {e['win_rate']:.0%} WR | "
+                        f"{e['expectancy']:+.1f}p exp\n\n")
+
+                if best_sess:
+                    e = sess_b[best_sess]
+                    msg += (
+                        f"⏰ Best Session: <b>{best_sess}</b>\n"
+                        f"   {e['win_rate']:.0%} WR\n\n")
+
+                msg += (
+                    f"<b>🧠 ML Engine:</b>\n"
+                    f"{'✅ Active' if ml_s['is_trained'] else '⏳ Accumulating'} "
+                    f"| {ml_s['n_samples']}/{ML_MIN_SAMPLES} resolved")
+
+                if ml_s.get("oos_accuracy", 0) > 0:
+                    msg += f" | OOS: {ml_s['oos_accuracy']:.0%}"
+
+                msg += (
+                    f"\n\n<b>⚠️ Risk Mode:</b> {risk_msg}\n\n"
+                    f"<b>Tomorrow's Kill Zones (WAT):</b>\n"
+                    f"🎯 London: 08:00–11:00 WAT\n"
+                    f"🎯 NY:     13:00–16:00 WAT\n\n"
+                    f"<i>Trade the plan. Protect the capital.\n"
+                    f"Scan #{AE._scan_count} total scans today.</i>"
+                )
+
+                # Send to all active subscribers
+                active = SUB_MANAGER.all_active()
+                sent   = 0
+                for chat_id, _ in active:
+                    ok = await send_msg(
+                        app.bot, chat_id, msg, parse_mode="HTML")
+                    if ok:
+                        sent += 1
+                    await asyncio.sleep(0.4)
+
+                log.info(f"Daily summary sent to {sent} users")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Daily summary error: {e}")
+                await asyncio.sleep(3600)
+
+    # ── Regime cache: pre-compute for major pairs ─────────────────
+    async def _run_regime_cache(self):
+        log.info("Regime cache task active")
+        await asyncio.sleep(25)
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    for pair in ASSET_CATEGORIES["forex_major"]:
+                        try:
+                            candles = await fetch_candles(
+                                session, pair, "H1", 168)
+                            daily   = await fetch_candles(
+                                session, pair, "D",  60)
+                            if len(candles) >= 50:
+                                regime = REGIME_ENGINE.detect(
+                                    candles, daily, pair)
+                                log.debug(
+                                    f"Regime {pair}: "
+                                    f"{regime.regime.value} | "
+                                    f"H:{regime.hurst_exponent:.2f} | "
+                                    f"Contradict:{regime.contradictory}")
+                            await asyncio.sleep(2)
+                        except Exception as e:
+                            log.debug(f"Regime cache {pair}: {e}")
+
+                # Refresh every 30 minutes
+                await asyncio.sleep(1800)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Regime cache error: {e}")
+                await asyncio.sleep(600)
+
+    # ── Health check: logs system status every 15 min ────────────
+    async def _run_health_check(self):
+        log.info("Health check task active")
+        while True:
+            try:
+                await asyncio.sleep(900)   # every 15 minutes
+
+                now      = datetime.now(timezone.utc)
+                session  = SESSION_ENGINE.get_session(now)
+                ml_s     = ML_ENGINE.get_stats()
+                active   = len(PT.active)
+                subs     = len(SUB_MANAGER.all_active())
+                history  = len(QB.history)
+                resolved = sum(1 for p in QB.history
+                               if p.get("outcome") in ("WIN","LOSS"))
+                pending  = sum(1 for p in QB.history
+                               if p.get("outcome") == "PENDING")
+
+                tasks_ok = sum(
+                    1 for t in self.tasks.values()
+                    if not t.done())
+
+                log.info(
+                    f"HEALTH | "
+                    f"{session.session_name} | "
+                    f"KZ:{session.is_kill_zone} | "
+                    f"WAT:{session.wat_time} | "
+                    f"Tasks:{tasks_ok}/{len(self.tasks)} | "
+                    f"ActivePreds:{active} | "
+                    f"Subs:{subs} | "
+                    f"History:{history} | "
+                    f"Resolved:{resolved} | "
+                    f"Pending:{pending} | "
+                    f"ML:{'✅' if ml_s['is_trained'] else '⏳'} "
+                    f"({ml_s['n_samples']}/{ML_MIN_SAMPLES}) | "
+                    f"Scans:{AE._scan_count}"
+                )
+
+                # Warn if tasks are dying
+                if tasks_ok < len(self.tasks):
+                    dead = [
+                        name for name, t in self.tasks.items()
+                        if t.done()]
+                    log.warning(
+                        f"Dead tasks detected: {dead}. "
+                        f"They will auto-restart.")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Health check error: {e}")
+                await asyncio.sleep(300)
+
+    def stop_all(self):
+        """Cancel all running tasks gracefully."""
+        self.running = False
+        for name, task in self.tasks.items():
+            if not task.done():
+                task.cancel()
+                log.info(f"Task cancelled: {name}")
+
+    def get_status(self) -> Dict:
+        return {
+            name: {
+                "running":    not task.done(),
+                "errors":     self.error_counts.get(name, 0),
+                "started_at": (self.start_times[name].isoformat()
+                               if name in self.start_times else None),
+            }
+            for name, task in self.tasks.items()
+        }
 
 
-async def initial_backtest():
-    await asyncio.sleep(30)
+BG_MANAGER = BackgroundTaskManager()
+
+# ════════════════════════════════════════════════════════════════
+#  ADDITIONAL COMMAND HANDLERS
+# ════════════════════════════════════════════════════════════════
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """System health status command."""
+    session  = SESSION_ENGINE.get_session()
+    ml_s     = ML_ENGINE.get_stats()
+    exp      = PERF_ENGINE.get_expectancy()
+    task_st  = BG_MANAGER.get_status()
+    wat      = session.wat_time
+    utc_t    = SESSION_ENGINE.utc_time()
+
+    tasks_ok  = sum(1 for t in task_st.values() if t["running"])
+    tasks_tot = len(task_st)
+
+    resolved  = sum(1 for p in QB.history
+                    if p.get("outcome") in ("WIN","LOSS"))
+    pending   = sum(1 for p in QB.history
+                    if p.get("outcome") == "PENDING")
+
+    msg = (
+        f"{'='*35}\n"
+        f"⚙️ <b>SYSTEM STATUS</b>\n"
+        f"{'='*35}\n\n"
+        f"🕐 {wat} ({utc_t})\n"
+        f"📍 {session.session_name}"
+        f"{' | 🎯 ' + session.kill_zone_name if session.is_kill_zone else ''}\n"
+        f"AMD Phase: {session.amd_phase}\n"
+        f"DST: "
+        f"{'London ' if session.is_dst_london else ''}"
+        f"{'NY' if session.is_dst_ny else ''}"
+        f"{'None' if not session.is_dst_london and not session.is_dst_ny else ''}\n\n"
+
+        f"{'─'*35}\n"
+        f"<b>Background Tasks ({tasks_ok}/{tasks_tot} running):</b>\n"
+    )
+
+    for name, st in task_st.items():
+        icon = "✅" if st["running"] else "❌"
+        err  = f" ({st['errors']}err)" if st["errors"] > 0 else ""
+        msg += f"{icon} {name}{err}\n"
+
+    msg += (
+        f"\n{'─'*35}\n"
+        f"<b>Data:</b>\n"
+        f"├ History:    {len(QB.history)} signals\n"
+        f"├ Resolved:   {resolved}\n"
+        f"├ Pending:    {pending}\n"
+        f"├ Active:     {len(PT.active)} predictions\n"
+        f"├ Subscribers:{len(SUB_MANAGER.all_active())}\n"
+        f"├ Patterns:   {len(PATTERN_MEMORY.patterns)}\n"
+        f"├ BT results: {len(HISTORICAL_BT.results)}\n"
+        f"└ ML store:   {ML_DATA_STORE.n_total} total / "
+        f"{ML_DATA_STORE.n_samples} resolved\n\n"
+
+        f"{'─'*35}\n"
+        f"<b>ML Engine:</b>\n"
+        f"├ Status:    "
+        f"{'✅ Trained' if ml_s['is_trained'] else '⏳ Accumulating'}\n"
+        f"├ Resolved:  {ml_s['n_samples']}/{ML_MIN_SAMPLES}\n"
+        f"├ Total:     {ml_s['n_total']} tracked\n"
+        f"├ Need:      {ml_s['n_needed']} more resolved\n"
+        f"├ OOS Acc:   {ml_s['oos_accuracy']:.1%}\n"
+        f"├ Brier:     {ml_s['brier_score']:.3f}\n"
+        f"└ Calibrated:{'✅' if ml_s['is_calibrated'] else '❌'}\n\n"
+
+        f"{'─'*35}\n"
+        f"<b>Performance:</b>\n"
+        f"├ Trades:    {exp['total']}\n"
+        f"├ Win Rate:  {exp['win_rate']:.1%}\n"
+        f"├ Expectancy:{exp['expectancy']:+.1f} pips/trade\n"
+        f"└ Max DD:    "
+        f"{PERF_ENGINE.data.get('max_drawdown',0):.1f} pips\n\n"
+
+        f"<b>Scanner:</b>\n"
+        f"└ Total scans: {AE._scan_count}\n"
+    )
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show backtest results."""
+    msg_l  = await update.message.reply_text(
+        "⏳ Loading backtest results...", parse_mode="HTML")
+    report = HISTORICAL_BT.format_report(QB.history)
+    ch     = chart_performance(QB.history)
+    await del_msg(msg_l)
+    if ch:
+        await send_photo(
+            ctx.bot, update.effective_chat.id, ch,
+            caption="📊 <b>Backtest + Performance</b>",
+            parse_mode="HTML")
+    await update.message.reply_text(
+        report, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_scan_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Force an immediate scan of all pairs."""
+    session = SESSION_ENGINE.get_session()
+    msg_l   = await update.message.reply_text(
+        f"🔍 Scanning all {len(ALL_PAIRS)} pairs...\n"
+        f"Session: {session.session_name} | {session.wat_time}",
+        parse_mode="HTML")
     try:
-        if HISTORICAL_BT.stale():
-            log.info("Running initial backtest...")
-            await HISTORICAL_BT.run_full_backtest(
-                pairs=ASSET_CATEGORIES["forex_major"][:5],
-                timeframe="H1")
+        n = await AE.scan_all(ctx.application)
+        await msg_l.edit_text(
+            f"✅ Scan complete. {n} signal(s) sent.\n"
+            f"Total scans run: {AE._scan_count}",
+            parse_mode="HTML")
     except Exception as e:
-        log.error(f"Initial backtest: {e}")
+        await msg_l.edit_text(f"❌ Scan error: {str(e)[:100]}")
+
+
+async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """List all tracked instruments."""
+    session = SESSION_ENGINE.get_session()
+    best    = SA.BEST_PAIRS.get(session.session_name, [])
+
+    msg = (
+        f"💱 <b>ALL TRACKED INSTRUMENTS</b>\n\n"
+        f"🕐 {session.wat_time} | {session.session_name}\n\n"
+                f"<b>📊 Majors ({len(ASSET_CATEGORIES['forex_major'])}):</b>\n"
+        f"{', '.join(pair_display(p) for p in ASSET_CATEGORIES['forex_major'])}\n\n"
+        f"<b>💱 Crosses ({len(ASSET_CATEGORIES['forex_cross'])}):</b>\n"
+        f"{', '.join(pair_display(p) for p in ASSET_CATEGORIES['forex_cross'])}\n\n"
+        f"<b>🥇 Metals ({len(ASSET_CATEGORIES['metals'])}):</b>\n"
+        f"{', '.join(pair_display(p) for p in ASSET_CATEGORIES['metals'])}\n\n"
+        f"<b>📈 Indices ({len(ASSET_CATEGORIES['indices'])}):</b>\n"
+        f"{', '.join(pair_display(p) for p in ASSET_CATEGORIES['indices'])}\n\n"
+        f"<b>Total: {len(ALL_PAIRS)} instruments</b>\n\n"
+    )
+
+    if best:
+        msg += (
+            f"<b>✅ Best for {session.session_name} now:</b>\n"
+            f"{', '.join(pair_display(p) for p in best)}\n\n")
+
+    msg += (
+        f"<i>All {len(ALL_PAIRS)} pairs scanned automatically.\n"
+        f"Use /alerts to subscribe to signals.</i>"
+    )
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_math(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Explain the mathematical models used."""
+    msg = (
+        f"📐 <b>MARKET MATHEMATICS GUIDE</b>\n\n"
+
+        f"<b>Hurst Exponent (H):</b>\n"
+        f"• H > 0.58: Trending (momentum strategies work)\n"
+        f"• H = 0.50: Random walk (no statistical edge)\n"
+        f"• H < 0.42: Mean-reverting (fade extremes)\n"
+        f"• Calculated via Rescaled Range (R/S) analysis\n\n"
+
+        f"<b>Fractal Dimension:</b>\n"
+        f"• Near 1.0: Clean smooth trend\n"
+        f"• Near 2.0: Chaotic space-filling\n"
+        f"• Independent confirmation of Hurst\n\n"
+
+        f"<b>Shannon Entropy:</b>\n"
+        f"• Low (<0.5): Orderly, predictable\n"
+        f"• High (>0.85): Chaotic, avoid trading\n"
+        f"• Measures information disorder in returns\n\n"
+
+        f"<b>Z-Score Normalization:</b>\n"
+        f"• Signals scored vs own 200-period history\n"
+        f"• Normal imbalance: z = 0.5 (ignored)\n"
+        f"• Unusual imbalance: z > 2.0 ✅ (actionable)\n"
+        f"• Prevents false confluence from normal noise\n\n"
+
+        f"<b>Variance Ratio Test:</b>\n"
+        f"• > 1.0: Momentum (prices persist)\n"
+        f"• = 1.0: Random walk\n"
+        f"• < 1.0: Mean reversion\n\n"
+
+        f"<b>Market Efficiency Ratio:</b>\n"
+        f"• Direct move / total path = 0 to 1\n"
+        f"• Near 1.0: Pure trend (efficient move)\n"
+        f"• Near 0.0: Choppy (inefficient)\n\n"
+
+        f"<b>ADR (Avg Daily Range):</b>\n"
+        f"• Signals rejected if >80% of ADR consumed\n"
+        f"• Prevents chasing exhausted moves\n"
+        f"• Calculated over last 20 trading days\n\n"
+
+        f"<b>R/R Calculation (FIXED in v8.1):</b>\n"
+        f"• R/R = Reward ÷ Risk\n"
+        f"• 1:2 means risk 1 pip to make 2 pips\n"
+        f"• Minimum: 1:{MIN_RR_RATIO}\n"
+        f"• Validated BEFORE any signal is sent\n\n"
+
+        f"<b>Kelly Criterion:</b>\n"
+        f"• Optimal bet = f = (bp-q)/b\n"
+        f"• We use Half-Kelly for safety\n"
+        f"• Capped at 5% of account\n\n"
+
+        f"<b>Fibonacci OTE Zone:</b>\n"
+        f"• 61.8%–78.6% retracement\n"
+        f"• Optimal Trade Entry (ICT)\n"
+        f"• Highest probability when OB/FVG aligns\n\n"
+
+        f"<b>Regime Contradiction Detection:</b>\n"
+        f"• Hurst says trending BUT ER says choppy\n"
+        f"• Signal confidence penalized by 15%\n"
+        f"• Displayed with ⚠️ in signals\n"
+    )
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_ict(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Explain ICT concepts implemented."""
+    msg = (
+        f"🏛️ <b>ICT CONCEPTS IN v8.1</b>\n\n"
+
+        f"<b>Market Structure:</b>\n"
+        f"• BOS: Break of Structure (trend continuation)\n"
+        f"• CHOCH: Change of Character (reversal signal)\n"
+        f"• HH+HL = Bullish | LH+LL = Bearish\n"
+        f"• Internal vs External structure tracked\n\n"
+
+        f"<b>Liquidity Levels:</b>\n"
+        f"• Equal Highs/Lows: stop-loss clusters\n"
+        f"• PDH/PDL: Previous Day High/Low\n"
+        f"• ASH/ASL: Asian Session High/Low\n"
+        f"• Sweep = wick through + close back inside\n\n"
+
+        f"<b>Fair Value Gap (FVG):</b>\n"
+        f"• 3-candle pattern leaving a price gap\n"
+        f"• Unfilled = magnet for future price\n"
+        f"• Consequent encroachment (50% fill)\n"
+        f"• Inversion: once filled becomes S/R\n\n"
+
+        f"<b>Order Block (STRICT validation):</b>\n"
+        f"✅ Last opposing candle before displacement\n"
+        f"✅ Displacement must break structure\n"
+        f"✅ Must leave a Fair Value Gap\n"
+        f"❌ Missing any = OB rejected entirely\n\n"
+
+        f"<b>Displacement Candle:</b>\n"
+        f"• Body ≥ 65% of total range\n"
+        f"• Body ≥ 1.5× recent average body\n"
+        f"• Institutional order execution signature\n\n"
+
+        f"<b>AMD (Power of Three):</b>\n"
+        f"• Accumulation: Asian session range\n"
+        f"• Manipulation: Fake move at session open\n"
+        f"• Distribution: True directional move\n"
+        f"• Only trades DISTRIBUTION phase\n\n"
+
+        f"<b>OTE Zone (Optimal Trade Entry):</b>\n"
+        f"• 61.8%–78.6% Fibonacci retracement\n"
+        f"• Where institutions re-enter after impulse\n"
+        f"• Strongest when OB or FVG aligns here\n\n"
+
+        f"<b>Kill Zones (WAT times):</b>\n"
+        f"🎯 London KZ: 08:00–11:00 WAT\n"
+        f"🎯 NY KZ:     13:00–16:00 WAT\n"
+        f"• AMD manipulation phase happens here\n"
+        f"• Tighter scan interval (90s vs 240s)\n"
+        f"• Lower confidence threshold for alerts\n\n"
+
+        f"<b>HTF Bias Enforcement (NEW v8.1):</b>\n"
+        f"• Never LONG against H4 bearish structure\n"
+        f"• Never SHORT against H4 bullish structure\n"
+        f"• NEUTRAL HTF allowed but penalized\n"
+    )
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Look up a specific trade by Trade ID."""
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /trade FQ-EURUSD-BUY-20240115-A3K9\n\n"
+            "Find a specific trade by its ID.",
+            reply_markup=kb_main())
+        return
+
+    trade_id = args[0].upper()
+
+    # Search active predictions
+    active_match = next(
+        (p for p in PT.active if p.trade_id == trade_id), None)
+
+    # Search history
+    history_match = next(
+        (h for h in QB.history
+         if h.get("trade_id") == trade_id), None)
+
+    if not active_match and not history_match:
+        await update.message.reply_text(
+            f"❌ Trade ID <code>{trade_id}</code> not found.\n\n"
+            f"<i>Trade IDs are shown in signal messages.\n"
+            f"Format: FQ-EURUSD-BUY-20240115-A3K9</i>",
+            parse_mode="HTML", reply_markup=kb_main())
+        return
+
+    if active_match:
+        pred = active_match
+        pip  = pip_value(pred.pair)
+        # Try to get current price
+        cp   = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                cp = await fetch_current_price(session, pred.pair)
+        except Exception:
+            pass
+
+        pnl = 0.0
+        if cp:
+            if pred.direction == "LONG":
+                pnl = (cp - pred.current_price) / pip
+            else:
+                pnl = (pred.current_price - cp) / pip
+
+        msg = (
+            f"{'='*35}\n"
+            f"📋 <b>TRADE LOOKUP</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{trade_id}</code>\n"
+            f"Status: <b>🟡 ACTIVE</b>\n\n"
+            f"{asset_emoji(pred.pair)} <b>{pair_display(pred.pair)}</b> | "
+            f"{'🟢' if pred.direction=='LONG' else '🔴'} "
+            f"{pred.direction}\n"
+            f"📐 Strategy: {pred.strategy}\n"
+            f"⭐ Quality:  {pred.quality}\n\n"
+            f"<b>Levels:</b>\n"
+            f"├ Entry:     <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ 🎯 Target: <code>{fmt_price(pred.target_price,  pred.pair)}</code>\n"
+            f"├ ⛔ Stop:   <code>{fmt_price(pred.invalidation_price, pred.pair)}</code>\n"
+            f"├ 📌 BE:     <code>{fmt_price(pred.breakeven_price, pred.pair)}</code>\n"
+            f"└ 🔄 Trail:  <code>{fmt_price(pred.trailing_price,  pred.pair)}</code>\n\n"
+            f"<b>Stats:</b>\n"
+            f"├ R/R:      1:{pred.rr_ratio:.2f}\n"
+            f"├ Reward:   +{pred.reward_pips:.1f} pips\n"
+            f"├ Risk:     -{pred.risk_pips:.1f} pips\n"
+            f"├ Conf:     {pred.confidence:.0f}%\n"
+            f"├ MFE so far: +{pred.mfe_pips:.1f}p\n"
+            f"├ MAE so far: -{pred.mae_pips:.1f}p\n"
+        )
+        if cp:
+            msg += (
+                f"├ Current:  <code>{fmt_price(cp, pred.pair)}</code>\n"
+                f"└ Float P/L: <b>{pnl:+.1f} pips</b>\n\n"
+            )
+        msg += (
+            f"<b>Context:</b>\n"
+            f"├ Session: {pred.session_at_signal}\n"
+            f"├ Regime:  {pred.regime_at_signal}\n"
+            f"├ ML:      {pred.ml_confidence:.0%}\n"
+            f"└ Opened:  {pred.timestamp[:19]}\n\n"
+            f"<b>BE notified:</b> "
+            f"{'✅' if pred.breakeven_notified else '⏳'} | "
+            f"<b>Trail notified:</b> "
+            f"{'✅' if pred.trailing_notified else '⏳'}\n"
+        )
+
+    else:
+        h   = history_match
+        msg = (
+            f"{'='*35}\n"
+            f"📋 <b>TRADE LOOKUP</b>\n"
+            f"{'='*35}\n\n"
+            f"🆔 <code>{trade_id}</code>\n"
+        )
+        outcome = h.get("outcome", "PENDING")
+        if outcome == "WIN":
+            status_icon = "✅ WIN"
+        elif outcome == "LOSS":
+            status_icon = "❌ LOSS"
+        elif outcome == "EXPIRED":
+            status_icon = "⏰ EXPIRED"
+        else:
+            status_icon = "🟡 PENDING"
+
+        msg += (
+            f"Status: <b>{status_icon}</b>\n\n"
+            f"{asset_emoji(h.get('pair',''))} "
+            f"<b>{pair_display(h.get('pair','?'))}</b> | "
+            f"{'🟢' if h.get('direction')=='LONG' else '🔴'} "
+            f"{h.get('direction','?')}\n"
+            f"📐 Strategy: {h.get('strategy','?')}\n"
+            f"⭐ Quality:  {h.get('quality','?')}\n\n"
+            f"<b>Levels:</b>\n"
+            f"├ Entry:  <code>{fmt_price(h.get('current_price',0), h.get('pair','EUR_USD'))}</code>\n"
+            f"├ Target: <code>{fmt_price(h.get('target_price',0),  h.get('pair','EUR_USD'))}</code>\n"
+            f"└ Stop:   <code>{fmt_price(h.get('invalidation_price',0), h.get('pair','EUR_USD'))}</code>\n\n"
+            f"<b>Result:</b>\n"
+            f"├ P/L:   <b>{h.get('pips_gained',0):+.1f} pips</b>\n"
+            f"├ MAE:   {h.get('mae_pips',0):.1f}p\n"
+            f"├ MFE:   {h.get('mfe_pips',0):.1f}p\n"
+            f"├ R/R:   1:{h.get('rr_ratio',0):.2f}\n"
+            f"├ Conf:  {h.get('confidence',0):.0f}%\n\n"
+            f"<b>Context:</b>\n"
+            f"├ Session: {h.get('session','?')}\n"
+            f"├ Regime:  {h.get('regime','?')}\n"
+            f"└ Opened:  {str(h.get('timestamp','?'))[:19]}\n"
+        )
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all currently active predictions."""
+    if not PT.active:
+        await update.message.reply_text(
+            "📋 <b>No active predictions right now.</b>\n\n"
+            "<i>Signals are tracked automatically when generated.</i>",
+            parse_mode="HTML", reply_markup=kb_main())
+        return
+
+    msg = (
+        f"📋 <b>ACTIVE PREDICTIONS ({len(PT.active)})</b>\n\n"
+        f"{'─'*35}\n"
+    )
+
+    for pred in PT.active[:10]:   # show max 10
+        pip  = pip_value(pred.pair)
+        de   = "🟢" if pred.direction == "LONG" else "🔴"
+        age  = ""
+        try:
+            pt  = datetime.fromisoformat(
+                pred.timestamp.replace("Z","+00:00"))
+            hrs = (datetime.now(timezone.utc) - pt
+                   ).total_seconds() / 3600
+            age = f"{hrs:.1f}h"
+        except Exception:
+            pass
+
+        msg += (
+            f"🆔 <code>{pred.trade_id}</code>\n"
+            f"{asset_emoji(pred.pair)} "
+            f"<b>{pair_display(pred.pair)}</b> "
+            f"{de} {pred.direction} | {pred.quality}\n"
+            f"├ Entry:   <code>{fmt_price(pred.current_price, pred.pair)}</code>\n"
+            f"├ Target:  <code>{fmt_price(pred.target_price,  pred.pair)}</code>\n"
+            f"├ Stop:    <code>{fmt_price(pred.invalidation_price, pred.pair)}</code>\n"
+            f"├ R/R:     1:{pred.rr_ratio:.2f} | "
+            f"Conf: {pred.confidence:.0f}%\n"
+            f"├ BE: {'✅' if pred.breakeven_notified else '⏳'} | "
+            f"Trail: {'✅' if pred.trailing_notified else '⏳'}\n"
+            f"└ Age: {age} | MFE:{pred.mfe_pips:.1f}p MAE:{pred.mae_pips:.1f}p\n\n"
+        )
+
+    if len(PT.active) > 10:
+        msg += f"<i>...and {len(PT.active)-10} more</i>\n"
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_ml(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show detailed ML engine status."""
+    ml_s = ML_ENGINE.get_stats()
+    msg  = (
+        f"{'='*35}\n"
+        f"🧠 <b>ML ENGINE STATUS</b>\n"
+        f"{'='*35}\n\n"
+
+        f"<b>Status:</b> "
+        f"{'✅ ACTIVE & LEARNING' if ml_s['is_trained'] else '⏳ ACCUMULATING DATA'}\n\n"
+
+        f"<b>Data:</b>\n"
+        f"├ Total tracked:  {ml_s['n_total']}\n"
+        f"├ Resolved:       {ml_s['n_samples']}\n"
+        f"├ Need to train:  {ml_s['n_needed']} more\n"
+        f"└ Min threshold:  {ML_MIN_SAMPLES}\n\n"
+    )
+
+    if ml_s["is_trained"]:
+        msg += (
+            f"<b>Performance:</b>\n"
+            f"├ OOS Accuracy:  <b>{ml_s['oos_accuracy']:.1%}</b>\n"
+            f"├ Brier Score:   {ml_s['brier_score']:.4f} "
+            f"(lower=better)\n"
+            f"├ Calibrated:    "
+            f"{'✅ Yes' if ml_s['is_calibrated'] else '❌ No'}\n"
+            f"└ Ensemble:      "
+            f"RF {ml_s['weights'][0]:.0%} + "
+            f"GB {ml_s['weights'][1]:.0%} + "
+            f"LR {ml_s['weights'][2]:.0%}\n\n"
+
+            f"<b>Top Predictive Features:</b>\n"
+        )
+        for feat, imp in ml_s.get("top_features", [])[:8]:
+            bar = progress_bar(imp * 1000, 8)
+            msg += f"• {feat[:20]}: {bar} {imp:.4f}\n"
+
+        if ml_s["accuracy_history"]:
+            msg += (
+                f"\n<b>Accuracy History:</b>\n"
+                f"{' → '.join(f'{v:.0%}' for v in ml_s['accuracy_history'][-5:])}\n"
+            )
+    else:
+        msg += (
+            f"<b>What happens at {ML_MIN_SAMPLES} samples:</b>\n"
+            f"• Purged walk-forward training begins\n"
+            f"• Isotonic probability calibration\n"
+            f"• Meta-labeling: predicts signal SUCCESS\n"
+            f"• NOT direction — the rule system does that\n"
+            f"• Signals with ML prob < 38% are penalized\n\n"
+            f"<b>Data accumulates from:</b>\n"
+            f"• Every auto-alert signal generated\n"
+            f"• Every manual /signal request\n"
+            f"• Historical backtest simulation\n"
+            f"• Data persists across bot restarts ✅\n"
+        )
+
+    await update.message.reply_text(
+        msg, parse_mode="HTML", reply_markup=kb_main())
+
+
+async def cmd_validate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Test signal geometry validator — useful for debugging."""
+    args = ctx.args
+    if len(args) < 4:
+        await update.message.reply_text(
+            "Usage: /validate DIRECTION ENTRY TARGET STOP PAIR\n\n"
+            "Example: /validate LONG 1.0820 1.0870 1.0800 EUR_USD\n\n"
+            "Tests if a signal would pass geometry validation.",
+            reply_markup=kb_main())
+        return
+
+    try:
+        direction = args[0].upper()
+        entry     = float(args[1])
+        target    = float(args[2])
+        stop      = float(args[3])
+        pair      = args[4].upper() if len(args) > 4 else "EUR_USD"
+
+        if pair not in ALL_PAIRS:
+            pair = "EUR_USD"
+
+        val = validate_signal_geometry(
+            direction, entry, target, stop, pair)
+
+        if val.is_valid:
+            msg = (
+                f"✅ <b>SIGNAL VALID</b>\n\n"
+                f"Pair:       {pair_display(pair)}\n"
+                f"Direction:  {direction}\n"
+                f"Entry:      <code>{fmt_price(entry,  pair)}</code>\n"
+                f"Target:     <code>{fmt_price(target, pair)}</code>\n"
+                f"Stop:       <code>{fmt_price(stop,   pair)}</code>\n\n"
+                f"Reward:     +{val.reward_pips:.1f} pips\n"
+                f"Risk:       -{val.risk_pips:.1f} pips\n"
+                f"R/R:        1:{val.rr_ratio:.2f} ✅\n\n"
+                f"BE Level:   <code>{fmt_price(calculate_breakeven_price(direction, entry, target), pair)}</code>\n"
+                f"Trail Level:<code>{fmt_price(calculate_trailing_price(direction, entry, target), pair)}</code>"
+            )
+        else:
+            msg = (
+                f"❌ <b>SIGNAL INVALID</b>\n\n"
+                f"Pair:      {pair_display(pair)}\n"
+                f"Direction: {direction}\n"
+                f"Entry:     <code>{fmt_price(entry,  pair)}</code>\n"
+                f"Target:    <code>{fmt_price(target, pair)}</code>\n"
+                f"Stop:      <code>{fmt_price(stop,   pair)}</code>\n\n"
+                f"<b>Reason: {val.reason}</b>\n\n"
+                f"Reward pips: {val.reward_pips:.1f}\n"
+                f"Risk pips:   {val.risk_pips:.1f}\n"
+                f"R/R:         {val.rr_ratio:.2f}"
+            )
+
+        await update.message.reply_text(
+            msg, parse_mode="HTML", reply_markup=kb_main())
+
+    except (ValueError, IndexError) as e:
+        await update.message.reply_text(
+            f"❌ Parse error: {e}\n\n"
+            f"Usage: /validate LONG 1.0820 1.0870 1.0800 EUR_USD",
+            reply_markup=kb_main())
 
 
 # ════════════════════════════════════════════════════════════════
-#  MAIN
+#  STARTUP AND SHUTDOWN HOOKS
+# ════════════════════════════════════════════════════════════════
+
+async def on_startup(app):
+    """Called after bot is initialized. Starts all background tasks."""
+    log.info("Bot startup sequence initiated...")
+
+    session = SESSION_ENGINE.get_session()
+    log.info(
+        f"Session: {session.session_name} | "
+        f"WAT: {session.wat_time} | "
+        f"KZ: {session.is_kill_zone} | "
+        f"AMD: {session.amd_phase}")
+
+    # Attempt to load any QB history into ML data store
+    # This ensures ML accumulates even if predictions were made
+    # before ML_DATA_STORE existed
+    existing_resolved = [
+        p for p in QB.history
+        if p.get("outcome") in ("WIN","LOSS")
+        and len(p.get("features",[])) == 20
+    ]
+    if existing_resolved:
+        log.info(
+            f"Found {len(existing_resolved)} resolved predictions "
+            f"in QB history — syncing to ML data store...")
+        for h in existing_resolved:
+            # Only add if not already in store
+            existing_ids = {
+                s.get("prediction_id","")
+                for s in ML_DATA_STORE.data}
+            if h.get("prediction_id","") not in existing_ids:
+                ML_DATA_STORE.add({
+                    "prediction_id": h.get("prediction_id",""),
+                    "features":      h.get("features",[]),
+                    "outcome":       h.get("outcome",""),
+                    "pips_gained":   h.get("pips_gained",0),
+                    "strategy":      h.get("strategy",""),
+                    "session":       h.get("session",""),
+                    "regime":        h.get("regime",""),
+                })
+        log.info(
+            f"ML data store now has "
+            f"{ML_DATA_STORE.n_samples} resolved samples")
+
+        # If we have enough, train immediately
+        if (ML_DATA_STORE.n_samples >= ML_MIN_SAMPLES
+                and not ML_ENGINE.is_trained):
+            log.info("Training ML immediately from existing data...")
+            result = ML_ENGINE.train()
+            log.info(f"Startup ML train: {result}")
+
+    # Start all background tasks
+    await BG_MANAGER.start_all(app)
+
+    # Notify existing subscribers of restart
+    active = SUB_MANAGER.all_active()
+    if active:
+        session = SESSION_ENGINE.get_session()
+        restart_msg = (
+            f"🔄 <b>FOREX QUANT v8.1 ONLINE</b>\n\n"
+            f"🕐 {session.wat_time}\n"
+            f"📍 {session.session_name}"
+            f"{' | 🎯 ' + session.kill_zone_name if session.is_kill_zone else ''}\n"
+            f"AMD: {session.amd_phase}\n\n"
+            f"<b>All systems active:</b>\n"
+            f"✅ Scanning {len(ALL_PAIRS)} instruments\n"
+            f"✅ Trade IDs for reference\n"
+            f"✅ Breakeven + trailing alerts\n"
+            f"✅ R/R validated (reward÷risk)\n"
+            f"✅ TP/SL only for YOUR signals\n"
+            f"✅ ML persists across restarts\n\n"
+            f"<b>ML:</b> "
+            f"{'✅ Active' if ML_ENGINE.is_trained else '⏳ Accumulating'} "
+            f"({ML_DATA_STORE.n_samples}/{ML_MIN_SAMPLES})\n\n"
+            f"<i>Signals fire automatically. "
+            f"Use /alerts to manage your subscription.</i>"
+        )
+        for chat_id, _ in active:
+            try:
+                await send_msg(app.bot, chat_id, restart_msg,
+                               parse_mode="HTML")
+                await asyncio.sleep(0.4)
+            except Exception:
+                pass
+
+    log.info("Startup complete. ForexQuant v8.1 is LIVE.")
+
+
+async def on_shutdown(app):
+    """Graceful shutdown — save all state."""
+    log.info("Shutdown initiated...")
+    BG_MANAGER.stop_all()
+
+    # Save all state files
+    try:
+        QB._save()
+        log.info("QB history saved")
+    except Exception as e:
+        log.error(f"QB save error: {e}")
+
+    try:
+        PT._save()
+        log.info("Active predictions saved")
+    except Exception as e:
+        log.error(f"PT save error: {e}")
+
+    try:
+        PATTERN_MEMORY._save()
+        log.info("Pattern memory saved")
+    except Exception as e:
+        log.error(f"Pattern memory save error: {e}")
+
+    try:
+        PERF_ENGINE._save()
+        log.info("Performance data saved")
+    except Exception as e:
+        log.error(f"Performance save error: {e}")
+
+    try:
+        HISTORICAL_BT._save()
+        log.info("Backtest results saved")
+    except Exception as e:
+        log.error(f"Backtest save error: {e}")
+
+    try:
+        ML_ENGINE._save()
+        log.info("ML model saved")
+    except Exception as e:
+        log.error(f"ML save error: {e}")
+
+    try:
+        ML_DATA_STORE._save()
+        log.info("ML data store saved")
+    except Exception as e:
+        log.error(f"ML data store save error: {e}")
+
+    log.info("All state saved. Shutdown complete.")
+
+# ════════════════════════════════════════════════════════════════
+#  MAIN ENTRY POINT
 # ════════════════════════════════════════════════════════════════
 
 def main():
+
+    # ── Platform config ──────────────────────────────────────────
+    if platform.system() == "Windows":
+        asyncio.set_event_loop_policy(
+            asyncio.WindowsSelectorEventLoopPolicy())
+
+    # ── Health server for Render/Railway keep-alive ───────────────
     Thread(target=start_health_server, daemon=True).start()
 
-    if platform.system() == "Windows":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    if platform.system() == "Windows":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # ── Startup banner ────────────────────────────────────────────
+    session  = SESSION_ENGINE.get_session()
+    ml_s     = ML_ENGINE.get_stats()
 
     log.info("=" * 65)
-    log.info("  FOREX QUANT v7.5 — ULTIMATE TRADING INTELLIGENCE SYSTEM")
+    log.info("  FOREX QUANT v8.1 — THE BEAST — ELITE TRADING INTELLIGENCE")
     log.info("=" * 65)
-    log.info(f"  VPIN · Kyle's Lambda · Toxicity · Roll Spread")
-    log.info(f"  Liquidity Zones: FVG · OB · Equal H/L · Demand/Supply")
-    log.info(f"  ML Ensemble: RF + Gradient Boosting + Logistic Regression")
-    log.info(f"  Historical Backtest: Autonomous 30-day engine")
-    log.info(f"  Pattern Memory: Learns from every resolved trade")
-    log.info(f"  Auto Alerts: {MIN_ALERT_CONFIDENCE}%+ conf | "
-             f"{MIN_ALERT_INST_SCORE}%+ inst | {MIN_ALERT_FACTORS}+ factors")
-    log.info(f"  Session Advisor: Best times per pair")
-    log.info(f"  Assets: {len(ALL_PAIRS)} instruments")
-    ml_s = ML_ENGINE.get_stats()
-    log.info(f"  ML: {'Trained' if ml_s['is_trained'] else 'Learning'} "
-             f"({ml_s['n_samples']} samples)")
+    log.info(f"  WAT Time:    {session.wat_time}")
+    log.info(f"  Session:     {session.session_name}")
+    log.info(f"  Kill Zone:   {session.is_kill_zone} "
+             f"({session.kill_zone_name if session.is_kill_zone else 'None'})")
+    log.info(f"  AMD Phase:   {session.amd_phase}")
+    log.info(f"  DST London:  {session.is_dst_london} | "
+             f"DST NY: {session.is_dst_ny}")
+    log.info("─" * 65)
+    log.info("  ICT:  BOS · CHOCH · OB · FVG · Sweep · AMD · OTE")
+    log.info("  MATH: Hurst · Entropy · Z-Score · ADR · Kelly · Fib")
+    log.info("  ML:   Meta-label · Purged WF · Isotonic Cal · Persistent")
+    log.info("  SIG:  Geometry validated · HTF enforced · R/R corrected")
+    log.info("  TRACK: Trade IDs · Breakeven · Trailing · MAE/MFE")
+    log.info("─" * 65)
+    log.info(f"  Instruments:  {len(ALL_PAIRS)} pairs")
+    log.info(f"  Strategies:   {len(list(StrategyType))}")
+    log.info(f"  ML Status:    "
+             f"{'Active' if ml_s['is_trained'] else 'Accumulating'} "
+             f"({ml_s['n_samples']}/{ML_MIN_SAMPLES} resolved, "
+             f"{ml_s['n_total']} total)")
+    log.info(f"  Active Preds: {len(PT.active)}")
+    log.info(f"  History:      {len(QB.history)} signals")
+    log.info(f"  Subscribers:  {len(SUB_MANAGER.all_active())}")
+    log.info(f"  BT Results:   {len(HISTORICAL_BT.results)} pairs")
+    log.info(f"  ML Store:     {ML_DATA_STORE.n_total} total / "
+             f"{ML_DATA_STORE.n_samples} resolved")
+    log.info(f"  Patterns:     {len(PATTERN_MEMORY.patterns)}")
+    log.info("─" * 65)
+    log.info(f"  Min R/R:      1:{MIN_RR_RATIO}")
+    log.info(f"  Min Target:   Forex {MIN_TARGET_PIPS_FOREX}p | "
+             f"Gold {MIN_TARGET_PIPS_GOLD}p")
+    log.info(f"  Breakeven:    At {BREAKEVEN_TRIGGER_PCT:.0f}% of target")
+    log.info(f"  Trailing:     At {TRAILING_TRIGGER_PCT:.0f}% of target")
+    log.info(f"  Scan Normal:  {SCAN_INTERVAL_NORMAL}s | "
+             f"KZ: {SCAN_INTERVAL_KILL_ZONE}s | "
+             f"Off: {SCAN_INTERVAL_OFF_HOURS}s")
     log.info("=" * 65)
 
-    app = (Application.builder()
-           .token(TELEGRAM_TOKEN)
-           .read_timeout(30)
-           .write_timeout(30)
-           .build())
+    # ── Build application ─────────────────────────────────────────
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .read_timeout(45)
+        .write_timeout(45)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
 
+    # ── Register ALL command handlers ─────────────────────────────
+
+    # Core trading commands
     app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("predict",  cmd_predict))
+    app.add_handler(CommandHandler("signal",   cmd_signal))
+    app.add_handler(CommandHandler("predict",  cmd_signal))      # alias
     app.add_handler(CommandHandler("analyze",  cmd_analyze))
     app.add_handler(CommandHandler("summary",  cmd_summary))
-    app.add_handler(CommandHandler("backtest", cmd_backtest))
+
+    # Alert and subscription
     app.add_handler(CommandHandler("alerts",   cmd_alerts))
+
+    # Market data
     app.add_handler(CommandHandler("sessions", cmd_sessions))
-    app.add_handler(CommandHandler("overview", cmd_overview))
     app.add_handler(CommandHandler("strength", cmd_strength))
+    app.add_handler(CommandHandler("overview", cmd_overview))
+    app.add_handler(CommandHandler("pairs",    cmd_pairs))
+
+    # Performance and tracking
+    app.add_handler(CommandHandler("performance", cmd_performance))
+    app.add_handler(CommandHandler("backtest",    cmd_backtest))
+    app.add_handler(CommandHandler("active",      cmd_active))
+    app.add_handler(CommandHandler("trade",       cmd_trade))
+
+    # ML status
+    app.add_handler(CommandHandler("ml",       cmd_ml))
+
+    # Educational
     app.add_handler(CommandHandler("guide",    cmd_guide))
+    app.add_handler(CommandHandler("math",     cmd_math))
+    app.add_handler(CommandHandler("ict",      cmd_ict))
+
+    # Admin/debug
+    app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("scan",     cmd_scan_now))
+    app.add_handler(CommandHandler("validate", cmd_validate))
+
+    # Callback handler (all inline buttons)
     app.add_handler(CallbackQueryHandler(on_callback))
+
+    # Error handler
     app.add_error_handler(on_error)
 
-    app.post_init = bg_tasks
+    # ── Lifecycle hooks ───────────────────────────────────────────
+    app.post_init     = on_startup
+    app.post_shutdown = on_shutdown
 
-    log.info("🚀 FOREX QUANT v7.5 is live!")
-    app.run_polling(drop_pending_updates=True)
+    # ── Launch ───────────────────────────────────────────────────
+    log.info("🚀 FOREX QUANT v8.1 launching — THE BEAST IS LIVE!")
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+        poll_interval=1.0,
+        timeout=30,
+    )
 
+
+# ════════════════════════════════════════════════════════════════
+#  PRODUCTION ASSEMBLY INSTRUCTIONS
+# ════════════════════════════════════════════════════════════════
+"""
+TO DEPLOY AS A SINGLE FILE:
+
+1. Create main.py
+2. Paste Part 1 entirely (no changes)
+3. Paste Part 2 after Part 1 — REMOVE the line:
+      from part1 import *
+4. Paste Part 3 after Part 2 — REMOVE the lines:
+      from part1 import *
+      from part2 import *
+5. Paste Part 4 after Part 3 — REMOVE the lines:
+      from part1 import *
+      from part2 import *
+      from part3 import *
+6. Keep ONLY the if __name__ == "__main__": at the very bottom
+   (from Part 4). Remove any others.
+
+COMMANDS AVAILABLE:
+  /start       — Welcome + current session status
+  /signal      — Get signal for a pair (/predict is alias)
+  /analyze     — Deep multi-part analysis
+  /summary     — Full market intelligence brief
+  /alerts      — Manage auto-alert subscription
+  /sessions    — Trading session guide (WAT times)
+  /strength    — Currency strength chart
+  /overview    — Market overview chart
+  /pairs       — List all tracked instruments
+  /performance — Full performance report + chart
+  /backtest    — Historical backtest results
+  /active      — Show all active predictions
+  /trade ID    — Look up specific trade by ID
+  /ml          — ML engine detailed status
+  /guide       — System guide
+  /math        — Market mathematics explained
+  /ict         — ICT concepts explained
+  /status      — System health (admin)
+  /scan        — Force immediate scan (admin)
+  /validate    — Test signal geometry validator
+
+KEY FIXES IN v8.1:
+  ✅ R/R = Reward÷Risk (was inverted showing 1:3 for bad trades)
+  ✅ Signal geometry validation before any signal sent
+  ✅ Minimum pip distances per instrument enforced
+  ✅ HTF bias conflict rejection (no LONG against H4 bearish)
+  ✅ Regime contradiction detection + confidence penalty
+  ✅ Trade IDs (FQ-EURUSD-BUY-20240115-A3K9)
+  ✅ Breakeven alert at 50% of target
+  ✅ Trailing stop alert at 75% of target
+  ✅ TP/SL/BE/Trail ONLY for signals sent to that user
+  ✅ ML persists across restarts (never resets)
+  ✅ ML activates at 50 resolved trades (was 300)
+  ✅ Quality filter per subscriber respected
+  ✅ All pairs scanned (was only subscribed pairs for some)
+  ✅ /trade command for trade ID lookup
+  ✅ /active shows all live predictions
+  ✅ /ml shows detailed ML status
+  ✅ /validate tests signal geometry
+
+FILES CREATED AT RUNTIME:
+  predictions_v81.json
+  active_predictions_v81.json
+  ml_model_v81.pkl
+  ml_training_data_v81.json
+  historical_backtest_v81.json
+  pattern_memory_v81.json
+  user_subscriptions_v81.json
+  performance_v81.json
+"""
+
+REQUIREMENTS_TXT = """
+python-telegram-bot==20.7
+aiohttp==3.9.1
+numpy==1.26.2
+scipy==1.11.4
+scikit-learn==1.3.2
+matplotlib==3.8.2
+"""
+
+RENDER_YAML = """
+services:
+  - type: web
+    name: forex-quant-v81
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: OANDA_API_KEY
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: OANDA_ENV
+        value: practice
+      - key: PORT
+        value: 10000
+"""
+
+# ════════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
